@@ -236,12 +236,12 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 
 ## Initial Roadmap
 
-* [ ] Configure Ubuntu host
-* [ ] Create Ansible bootstrap playbook
-* [ ] Install container runtime
-* [ ] Install `kubectl`
-* [ ] Install Helm
-* [ ] Create first Kubernetes cluster
+* [X] Configure Ubuntu host
+* [X] Create Ansible bootstrap playbook
+* [X] Install container runtime
+* [X] Install `kubectl`
+* [X] Install Helm
+* [X] Create first Kubernetes cluster
 * [ ] Create multi-node cluster
 * [ ] Create second Kubernetes cluster
 * [ ] Add GitOps

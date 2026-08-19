@@ -1,21 +1,9 @@
 ---
 - name: Configure homelab Ubuntu host
   hosts: local
-  become: true
+  become: true 
 
-  tasks:
-    - name: Update apt cache
-      ansible.builtin.apt:
-        update_cache: true
-        cache_valid_time: 3600
-
-    - name: Install base packages
-      ansible.builtin.apt:
-        name:
-          - curl
-          - git
-          - jq
-          - unzip
-          - htop
-          - ca-certificates
-        state: present
+  roles:
+    - base
+    - container_runtime
+    - kubernetes_tools
