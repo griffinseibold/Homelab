@@ -242,8 +242,8 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [X] Install `kubectl`
 * [X] Install Helm
 * [X] Create first Kubernetes cluster
-* [ ] Create multi-node cluster
-* [ ] Create second Kubernetes cluster
+* [X] Create multi-node cluster
+* [X] Create second Kubernetes cluster
 * [ ] Add GitOps
 * [ ] Add ingress
 * [ ] Add persistent storage
