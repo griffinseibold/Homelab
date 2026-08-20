@@ -107,3 +107,13 @@
     dest: /usr/local/bin/kind
     mode: "0755"
 
+- name: Download Flux installation script
+  ansible.builtin.get_url:
+    url: https://fluxcd.io/install.sh
+    dest: /tmp/install-flux.sh
+    mode: "0755"
+
+- name: Install Flux CLI
+  ansible.builtin.command:
+    cmd: /tmp/install-flux.sh
+    creates: /usr/local/bin/flux
