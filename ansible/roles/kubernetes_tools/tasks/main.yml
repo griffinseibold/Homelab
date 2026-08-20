@@ -48,3 +48,62 @@
   ansible.builtin.apt:
     name: kubectl
     state: present
+
+- name: Install Helm repository dependencies
+  ansible.builtin.apt:
+    name:
+      - curl
+      - gpg
+      - apt-transport-https
+    state: present
+
+- name: Download Helm repository signing key
+  ansible.builtin.get_url:
+    url: https://packages.buildkite.com/helm-linux/helm-debian/gpgkey
+    dest: /tmp/helm-signing-key.asc
+    mode: "0644"
+  register: helm_key_download
+
+- name: Read Helm signing key fingerprint
+  ansible.builtin.command:
+    cmd: gpg --show-keys --with-colons /tmp/helm-signing-key.asc
+  register: helm_key_info
+  changed_when: false
+
+- name: Verify Helm signing key fingerprint
+  ansible.builtin.assert:
+    that:
+      - "'DDF78C3E6EBB2D2CC223C95C62BA89D07698DBC6' in helm_key_info.stdout"
+    fail_msg: "Helm repository signing key fingerprint does not match expected value"
+
+- name: Convert Helm signing key to GPG keyring
+  ansible.builtin.shell:
+    cmd: >
+      gpg --dearmor
+      --yes
+      --output /usr/share/keyrings/helm.gpg
+      /tmp/helm-signing-key.asc
+  when: helm_key_download.changed
+
+- name: Add Helm apt repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/helm-stable-debian.list
+    mode: "0644"
+    content: |
+      deb [signed-by=/usr/share/keyrings/helm.gpg] https://packages.buildkite.com/helm-linux/helm-debian/any/ any main
+
+- name: Update apt cache after adding Helm repository
+  ansible.builtin.apt:
+    update_cache: true
+
+- name: Install Helm
+  ansible.builtin.apt:
+    name: helm
+    state: present
+
+- name: Install kind
+  ansible.builtin.get_url:
+    url: "https://kind.sigs.k8s.io/dl/{{ kind_version }}/kind-linux-amd64"
+    dest: /usr/local/bin/kind
+    mode: "0755"
+
