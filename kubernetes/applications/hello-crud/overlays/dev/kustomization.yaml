@@ -4,4 +4,4 @@ resources:
   - ../../base
 images:
   - name: ghcr.io/griffinseibold/hello-crud
-    newTag: 0.1.1
+    newTag: 0.2.0

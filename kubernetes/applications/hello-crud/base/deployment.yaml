@@ -6,6 +6,8 @@ metadata:
     app.kubernetes.io/name: hello-crud
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: hello-crud
@@ -25,6 +27,9 @@ spec:
         - name: hello-crud
           image: ghcr.io/griffinseibold/hello-crud:latest
           imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_PATH
+              value: /data/hello-crud.db
           ports:
             - name: http
               containerPort: 8080
@@ -54,8 +59,13 @@ spec:
                 - ALL
             readOnlyRootFilesystem: true
           volumeMounts:
+            - name: data
+              mountPath: /data
             - name: tmp
               mountPath: /tmp
       volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: hello-crud-data
         - name: tmp
           emptyDir: {}

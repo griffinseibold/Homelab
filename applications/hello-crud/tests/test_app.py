@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 
 import app as hello_crud
@@ -5,10 +7,20 @@ import app as hello_crud
 
 class HelloCrudTestCase(unittest.TestCase):
     def setUp(self):
-        hello_crud.app.config.update(TESTING=True)
-        hello_crud.items.clear()
-        hello_crud.next_id = 1
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database_path = os.path.join(
+            self.temporary_directory.name,
+            "hello-crud.db",
+        )
+        hello_crud.app.config.update(
+            TESTING=True,
+            DATABASE_PATH=self.database_path,
+        )
+        hello_crud.initialize_database()
         self.client = hello_crud.app.test_client()
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
 
     def test_hello_and_health(self):
         self.assertEqual(
@@ -38,7 +50,17 @@ class HelloCrudTestCase(unittest.TestCase):
         response = self.client.post("/items", json={"name": "  "})
         self.assertEqual(response.status_code, 400)
 
+    def test_items_survive_database_reinitialization(self):
+        self.client.post("/items", json={"name": "persistent"})
+
+        hello_crud.initialize_database()
+        replacement_client = hello_crud.app.test_client()
+
+        self.assertEqual(
+            replacement_client.get("/items").get_json(),
+            [{"id": 1, "name": "persistent"}],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
-

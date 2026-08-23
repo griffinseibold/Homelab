@@ -8,9 +8,10 @@ The long-term target is simple:
 
 > Install Ubuntu, clone this repository, run the bootstrap process, and recreate the environment.
 
-## Goals
+## Long-Term Learning Goals
 
-This homelab is intended to provide hands-on experience with:
+Beyond the currently implemented platform, this homelab may eventually provide
+hands-on experience with:
 
 * Linux administration
 * Ansible configuration management
@@ -43,37 +44,29 @@ Current host:
 
 The machine is intended to run multiple Kubernetes nodes and potentially multiple Kubernetes clusters without requiring a large number of traditional virtual machines.
 
-## Architecture
+## Current Architecture
 
-The planned environment is roughly:
+The repository currently builds and manages this environment:
 
 ```text
 Ubuntu Host
 │
 ├── Ansible
-│   └── Configures the host and installs required tooling
+│   └── Installs Docker, kubectl, Helm, Kind, and the Flux CLI
 │
-├── Container Runtime
-│
-├── Kubernetes
-│   ├── Cluster: dev
-│   │   ├── Control Plane
-│   │   └── Worker Nodes
-│   │
-│   └── Cluster: lab
-│       ├── Control Plane
-│       └── Worker Nodes
-│
-└── GitOps
-    └── Reconciles cluster state from this repository
-        ├── Applications
-        ├── Monitoring
-        ├── Networking
-        ├── Kafka
-        └── Other infrastructure
+└── Docker
+    └── Kind cluster: homelab-dev
+        ├── Control plane
+        ├── Two worker nodes
+        ├── Flux controllers
+        │   └── Reconcile kubernetes/clusters/dev from Git
+        └── hello-crud application
+            └── SQLite database on a persistent volume
 ```
 
-Cluster topology and tooling may change as the project develops.
+The `homelab-lab` Kind configuration exists, but that cluster is not currently
+bootstrapped with Flux or included in the active workflow. Gateway API,
+observability, and local LLM serving remain roadmap items.
 
 ## Repository Structure
 
@@ -83,7 +76,8 @@ homelab/
 ├── .gitignore
 │
 ├── ansible/
-│   ├── inventory/
+│   ├── ansible.cfg
+│   ├── inventory.ini
 │   ├── playbooks/
 │   └── roles/
 │
@@ -93,23 +87,26 @@ homelab/
 │       ├── tests/
 │       └── Dockerfile
 │
-├── kubernetes/
-│   ├── applications/
-│   │   └── hello-crud/
-│   │       ├── base/
-│   │       └── overlays/dev/
-│   ├── clusters/
-│   │   └── dev/
-│   │       ├── applications/
-│   │       └── flux-system/
-│   └── kind/
-│       ├── dev.yaml
-│       └── lab.yaml
+├── scripts/
+│   ├── bootstrap-host.sh
+│   └── bootstrap-dev.sh
 │
-├── helm/            # planned shared Helm values
-├── scripts/         # planned bootstrap helpers
-└── docs/            # planned design records
+└── kubernetes/
+    ├── applications/
+    │   └── hello-crud/
+    │       ├── base/
+    │       │   └── persistent-volume-claim.yaml
+    │       └── overlays/dev/
+    ├── clusters/
+    │   └── dev/
+    │       ├── applications/
+    │       └── flux-system/
+    └── kind/
+        ├── dev.yaml
+        └── lab.yaml
 ```
+
+Only paths that currently exist are shown.
 
 ### `applications/`
 
@@ -118,24 +115,13 @@ build files. Each application is self-contained under its own directory.
 
 ### `ansible/`
 
-Contains host configuration.
-
-Ansible will be responsible for tasks such as:
-
-* Installing required packages
-* Installing container tooling
-* Installing Kubernetes tooling
-* Installing Helm
-* Installing GitOps tooling
-* Configuring Linux settings
-* Configuring storage and directories
-* Performing repeatable host configuration
+Contains the inventory, playbook, and roles that configure the Ubuntu host and
+install Docker, Kubernetes command-line tools, Helm, Kind, and Flux.
 
 ### `kubernetes/`
 
-Contains declarative Kubernetes resources.
-
-Application manifests use a base-and-overlay structure:
+Contains Kind cluster definitions, Flux bootstrap resources, and declarative
+application resources. Application manifests use a base-and-overlay structure:
 
 * `kubernetes/applications/<name>/base` contains reusable resources.
 * `kubernetes/applications/<name>/overlays/<cluster>` contains cluster-specific
@@ -143,87 +129,128 @@ Application manifests use a base-and-overlay structure:
 * `kubernetes/clusters/<cluster>/applications` tells Flux which overlays that
   cluster should reconcile.
 
-Examples include:
-
-* Namespaces
-* Deployments
-* Services
-* ConfigMaps
-* Ingress resources
-* Network policies
-* Persistent storage
-* Monitoring infrastructure
-* Distributed-system workloads
-
-### `helm/`
-
-Contains Helm configuration and values files for applications installed through Helm.
-
 ### `scripts/`
 
-Contains small bootstrap and utility scripts where appropriate.
+Contains the two entry points for recreating the current environment:
 
-Scripts should be kept minimal. Repeatable configuration should generally live in Ansible or Kubernetes manifests rather than large shell scripts.
+* `bootstrap-host.sh` installs Ansible when needed and configures the Ubuntu
+  host.
+* `bootstrap-dev.sh` creates or reuses the dev cluster, builds local application
+  images, loads them into Kind, and bootstraps or verifies Flux.
 
-### `docs/`
+## What Needs to Run
 
-Contains architecture notes, design decisions, experiments, and lessons learned.
+| Component | When it needs to run |
+| --- | --- |
+| `./scripts/bootstrap-host.sh` | Once on a new host, and again when host tooling changes |
+| Docker daemon | Whenever the Kind cluster is running |
+| `./scripts/bootstrap-dev.sh` | To create or verify the dev cluster and load local images |
+| Flux controllers | Run automatically inside `homelab-dev` |
+| `hello-crud-data` volume | Provisioned automatically and retained across pod restarts |
+| `kubectl port-forward` | Only while accessing `hello-crud` from the host |
 
-## Bootstrap
+Flux polls Git and reconciles the cluster without a local process running in a
+terminal. The only interactive long-running command in the current workflow is
+`kubectl port-forward`.
 
-The eventual bootstrap workflow should look roughly like:
+## Bootstrap a Fresh Dev Environment
 
-```bash
-git clone git@github.com:<username>/homelab.git
-cd homelab
-```
+Bootstrap is split into two idempotent stages because new Docker group
+membership normally requires one login refresh between them.
 
-Install the minimal dependencies required to run Ansible:
-
-```bash
-sudo apt update
-sudo apt install -y git ansible
-```
-
-Run the host configuration:
-
-```bash
-ansible-playbook ansible/playbooks/bootstrap.yml
-```
-
-Create the Kubernetes environment:
+First, install Git if necessary and clone the repository:
 
 ```bash
-./scripts/create-cluster.sh
+sudo apt update && sudo apt install -y git
+git clone git@github.com:griffinseibold/Homelab.git
+cd Homelab
 ```
 
-Once GitOps is configured, the cluster should reconcile the remaining infrastructure directly from this repository.
+Configure the Ubuntu host:
 
-> Bootstrap commands will change as the project evolves.
+```bash
+./scripts/bootstrap-host.sh
+```
 
-## Deploying an Application
+Ansible prompts for the local user's sudo password. The password is used only
+for that playbook run and is not stored by the script or in the repository. On
+Ubuntu systems where `/usr/bin/sudo` is `sudo-rs`, the script automatically uses
+the compatible classic-sudo executable at `/usr/bin/sudo.ws` for Ansible.
 
-The `hello-crud` application is the reference layout for future applications.
-For the local dev cluster, build the image and load it into Kind before pushing
-the manifests:
+Log out and back in if the script asks you to activate Docker group membership.
+Then create or verify the complete dev environment:
+
+```bash
+./scripts/bootstrap-dev.sh
+```
+
+The dev script:
+
+* reuses `homelab-dev` if it already exists;
+* discovers dev application overlays with matching local Dockerfiles;
+* builds each manifest's declared image and loads it into Kind;
+* skips Flux bootstrap when Flux is already healthy;
+* asks for `GITHUB_TOKEN` only when a fresh cluster needs Flux bootstrap;
+* waits until Flux and every declared dev application are ready.
+
+Both scripts are safe to rerun. They do not delete or recreate an existing
+cluster. A token entered at the prompt exists only in the script process and is
+not written to this repository or the cluster.
+
+## Updating the Application
+
+Application source changes do not cause Flux to build a container. The current
+workflow deliberately builds images locally, and each release requires a new
+image tag.
+
+After changing the Python application, update `newTag` in
+`kubernetes/applications/hello-crud/overlays/dev/kustomization.yaml`, then build
+and load the matching tag. For example:
 
 ```bash
 docker build \
-  -t ghcr.io/griffinseibold/hello-crud:0.1.1 \
+  -t ghcr.io/griffinseibold/hello-crud:0.2.1 \
   applications/hello-crud
 kind load docker-image \
-  ghcr.io/griffinseibold/hello-crud:0.1.1 \
+  ghcr.io/griffinseibold/hello-crud:0.2.1 \
   --name homelab-dev
 ```
 
-Commit and push the application source and manifests. Flux will discover the
-dev cluster's application `Kustomization` and deploy the selected overlay.
+Commit and push the source and manifest change. Flux will detect the commit and
+roll out the new image. Reconciliation can be requested immediately instead of
+waiting for the polling interval:
+
+```bash
+flux reconcile kustomization hello-crud \
+  --with-source \
+  --context kind-homelab-dev
+```
 
 Until a Gateway is available, reach the service with port forwarding:
 
 ```bash
 kubectl --context kind-homelab-dev \
   -n hello-crud port-forward service/hello-crud 8080:80
+```
+
+## Persistent Storage
+
+`hello-crud` stores its items in a SQLite database at `/data/hello-crud.db`.
+The `hello-crud-data` claim requests 1 Gi from Kind's default `standard`
+local-path storage class and mounts it at `/data`.
+
+The data survives application rollouts, pod deletion, and Kind node-container
+restarts. It does not survive deleting the entire Kind cluster because the
+volume resides inside a Kind node. Storage that survives complete cluster
+rebuilds remains a separate requirement for model files and other important
+data.
+
+Inspect the claim and dynamically provisioned volume with:
+
+```bash
+kubectl --context kind-homelab-dev \
+  -n hello-crud get persistentvolumeclaim
+kubectl --context kind-homelab-dev get persistentvolume
 ```
 
 ## Infrastructure Philosophy
@@ -284,7 +311,7 @@ Sensitive files should be ignored through `.gitignore`.
 
 Long-term secrets management may use encrypted Git-managed secrets or an external secret-management solution.
 
-## Initial Roadmap
+## Roadmap
 
 * [X] Configure Ubuntu host
 * [X] Create Ansible bootstrap playbook
@@ -295,42 +322,53 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [X] Create multi-node cluster
 * [X] Create second Kubernetes cluster
 * [X] Add GitOps
-* [ ] Add ingress
-* [ ] Add persistent storage
+* [X] Deploy a sample application
+* [X] Add persistent application storage
+* [ ] Add Gateway API
 * [ ] Add Prometheus
 * [ ] Add Grafana
 * [ ] Add centralized logging
-* [ ] Deploy Kafka
-* [ ] Deploy Apache Flink
-* [ ] Deploy sample applications
-* [ ] Add CI validation for infrastructure changes
-* [ ] Add automated cluster rebuild process
-* [ ] Document architecture and design decisions
-* [ ] Test failure and recovery scenarios
+* [ ] Validate complete cluster rebuilds
+* [ ] Validate AMD GPU acceleration
+* [ ] Test `llama.cpp` with its Vulkan backend
+* [ ] Test Ollama with ROCm/Vulkan
+* [ ] Select a quantized 7B/8B instruct model
+* [ ] Create persistent model storage
+* [ ] Connect a simple client or chat UI
 
 ## Experiments
 
-This environment will also be used for targeted experiments such as:
+Experiments currently focus on building a reproducible Kubernetes platform and
+proving that the host can run a useful local LLM.
 
-* Kubernetes pod scheduling
-* Node affinity and anti-affinity
-* Taints and tolerations
-* Resource requests and limits
-* Pod disruption
-* Horizontal scaling
-* Rolling deployments
-* Cluster networking
-* Service discovery
-* Persistent volume behavior
-* Kafka partitioning
-* Consumer groups
-* Kafka failure recovery
-* Flink checkpointing
-* Stream-processing failure recovery
-* Observability and alerting
-* Multi-cluster deployment strategies
+### Platform Experiments
 
-Where useful, results and design decisions will be documented under `docs/`.
+* GitOps reconciliation and recovery from configuration drift
+* Application rollouts, rollbacks, health checks, and failure recovery
+* Resource requests, limits, scheduling, and pod disruption
+* Reusing application bases across cluster-specific Kustomize overlays
+* Persistent storage behavior across application and cluster restarts
+* Gateway API routing to services inside the cluster
+* Metrics, dashboards, and centralized application logs
+* Destroying and rebuilding the cluster entirely from source control
+
+### Local LLM Experiments
+
+* AMD GPU detection and acceleration on the Radeon RX 6900 XT
+* Comparing Vulkan and ROCm compatibility on the host
+* Comparing `llama.cpp` and Ollama for local inference
+* Running quantized 7B and 8B instruct models within 16 GB of VRAM
+* Measuring model load time, token throughput, memory use, and VRAM use
+* Comparing CPU-only, GPU-accelerated, and hybrid inference
+* Persisting model files independently from application containers
+* Exposing a local inference API to Kubernetes applications
+* Connecting a simple client or chat interface to the selected runtime
+
+Kafka, Flink, distributed training, RAG, and fine-tuning are not current project
+commitments and may be revisited after the local inference platform is stable.
+
+Where useful, results and design decisions will be committed alongside the
+configuration or application they describe.
 
 ## Reproducibility
 
@@ -343,9 +381,13 @@ Fresh Ubuntu installation
         ↓
 Clone repository
         ↓
-Run bootstrap
+Run Ansible host bootstrap
         ↓
-Create clusters
+Create the dev Kind cluster
+        ↓
+Build and load local application images
+        ↓
+Bootstrap Flux
         ↓
 GitOps reconciles infrastructure
         ↓

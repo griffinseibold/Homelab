@@ -3,6 +3,6 @@ kind: Kustomization
 namespace: hello-crud
 resources:
   - namespace.yaml
+  - persistent-volume-claim.yaml
   - deployment.yaml
   - service.yaml
-

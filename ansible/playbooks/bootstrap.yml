@@ -1,7 +1,7 @@
 ---
 - name: Configure homelab Ubuntu host
   hosts: local
-  become: true 
+  become: true
 
   roles:
     - base

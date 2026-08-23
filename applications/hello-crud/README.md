@@ -1,7 +1,8 @@
 # Hello CRUD
 
 A deliberately small JSON API for exercising the build and GitOps deployment
-path. Data is held in memory and is lost whenever the process restarts.
+path. Items are stored in SQLite. Kubernetes mounts the database from a 1 Gi
+persistent volume so data survives pod restarts and application redeployments.
 
 ## API
 
@@ -41,17 +42,22 @@ python app.py
 ## Build for Kind
 
 The dev overlay expects image
-`ghcr.io/griffinseibold/hello-crud:0.1.1`. Build it locally and load it into
+`ghcr.io/griffinseibold/hello-crud:0.2.0`. Build it locally and load it into
 every node in the Kind cluster before pushing the GitOps manifests:
 
 ```bash
 docker build \
-  -t ghcr.io/griffinseibold/hello-crud:0.1.1 \
+  -t ghcr.io/griffinseibold/hello-crud:0.2.0 \
   applications/hello-crud
 kind load docker-image \
-  ghcr.io/griffinseibold/hello-crud:0.1.1 \
+  ghcr.io/griffinseibold/hello-crud:0.2.0 \
   --name homelab-dev
 ```
+
+Kind's default local-path provisioner stores the volume inside the node. The
+data survives pod and node-container restarts, but deleting and recreating the
+entire Kind cluster deletes it. Durable storage across cluster rebuilds is a
+separate roadmap step for model files and other important data.
 
 After Flux deploys it, use port forwarding until a Gateway is installed:
 
