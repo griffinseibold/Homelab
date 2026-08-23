@@ -244,7 +244,7 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [X] Create first Kubernetes cluster
 * [X] Create multi-node cluster
 * [X] Create second Kubernetes cluster
-* [ ] Add GitOps
+* [X] Add GitOps
 * [ ] Add ingress
 * [ ] Add persistent storage
 * [ ] Add Prometheus
