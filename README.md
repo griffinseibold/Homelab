@@ -209,10 +209,10 @@ the manifests:
 
 ```bash
 docker build \
-  -t ghcr.io/griffinseibold/hello-crud:0.1.0 \
+  -t ghcr.io/griffinseibold/hello-crud:0.1.1 \
   applications/hello-crud
 kind load docker-image \
-  ghcr.io/griffinseibold/hello-crud:0.1.0 \
+  ghcr.io/griffinseibold/hello-crud:0.1.1 \
   --name homelab-dev
 ```
 

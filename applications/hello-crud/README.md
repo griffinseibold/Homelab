@@ -41,15 +41,15 @@ python app.py
 ## Build for Kind
 
 The dev overlay expects image
-`ghcr.io/griffinseibold/hello-crud:0.1.0`. Build it locally and load it into
+`ghcr.io/griffinseibold/hello-crud:0.1.1`. Build it locally and load it into
 every node in the Kind cluster before pushing the GitOps manifests:
 
 ```bash
 docker build \
-  -t ghcr.io/griffinseibold/hello-crud:0.1.0 \
+  -t ghcr.io/griffinseibold/hello-crud:0.1.1 \
   applications/hello-crud
 kind load docker-image \
-  ghcr.io/griffinseibold/hello-crud:0.1.0 \
+  ghcr.io/griffinseibold/hello-crud:0.1.1 \
   --name homelab-dev
 ```
 
@@ -59,4 +59,3 @@ After Flux deploys it, use port forwarding until a Gateway is installed:
 kubectl --context kind-homelab-dev \
   -n hello-crud port-forward service/hello-crud 8080:80
 ```
-
