@@ -87,17 +87,34 @@ homelab/
 │   ├── playbooks/
 │   └── roles/
 │
+├── applications/
+│   └── hello-crud/
+│       ├── app.py
+│       ├── tests/
+│       └── Dockerfile
+│
 ├── kubernetes/
+│   ├── applications/
+│   │   └── hello-crud/
+│   │       ├── base/
+│   │       └── overlays/dev/
 │   ├── clusters/
-│   ├── infrastructure/
-│   └── applications/
+│   │   └── dev/
+│   │       ├── applications/
+│   │       └── flux-system/
+│   └── kind/
+│       ├── dev.yaml
+│       └── lab.yaml
 │
-├── helm/
-│
-├── scripts/
-│
-└── docs/
+├── helm/            # planned shared Helm values
+├── scripts/         # planned bootstrap helpers
+└── docs/            # planned design records
 ```
+
+### `applications/`
+
+Contains application source code, tests, dependency definitions, and container
+build files. Each application is self-contained under its own directory.
 
 ### `ansible/`
 
@@ -117,6 +134,14 @@ Ansible will be responsible for tasks such as:
 ### `kubernetes/`
 
 Contains declarative Kubernetes resources.
+
+Application manifests use a base-and-overlay structure:
+
+* `kubernetes/applications/<name>/base` contains reusable resources.
+* `kubernetes/applications/<name>/overlays/<cluster>` contains cluster-specific
+  changes such as image tags or replica counts.
+* `kubernetes/clusters/<cluster>/applications` tells Flux which overlays that
+  cluster should reconcile.
 
 Examples include:
 
@@ -175,6 +200,31 @@ Create the Kubernetes environment:
 Once GitOps is configured, the cluster should reconcile the remaining infrastructure directly from this repository.
 
 > Bootstrap commands will change as the project evolves.
+
+## Deploying an Application
+
+The `hello-crud` application is the reference layout for future applications.
+For the local dev cluster, build the image and load it into Kind before pushing
+the manifests:
+
+```bash
+docker build \
+  -t ghcr.io/griffinseibold/hello-crud:0.1.0 \
+  applications/hello-crud
+kind load docker-image \
+  ghcr.io/griffinseibold/hello-crud:0.1.0 \
+  --name homelab-dev
+```
+
+Commit and push the application source and manifests. Flux will discover the
+dev cluster's application `Kustomization` and deploy the selected overlay.
+
+Until a Gateway is available, reach the service with port forwarding:
+
+```bash
+kubectl --context kind-homelab-dev \
+  -n hello-crud port-forward service/hello-crud 8080:80
+```
 
 ## Infrastructure Philosophy
 
