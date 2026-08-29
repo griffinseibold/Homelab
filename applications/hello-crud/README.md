@@ -59,9 +59,11 @@ data survives pod and node-container restarts, but deleting and recreating the
 entire Kind cluster deletes it. Durable storage across cluster rebuilds is a
 separate roadmap step for model files and other important data.
 
-After Flux deploys it, use port forwarding until a Gateway is installed:
+After Flux deploys it, reach the application through the shared Gateway:
 
 ```bash
-kubectl --context kind-homelab-dev \
-  -n hello-crud port-forward service/hello-crud 8080:80
+curl --noproxy '*' http://localhost:8080/healthz
 ```
+
+When reusing a cluster that predates the localhost Gateway port mapping, use
+the Kind node URL printed by the bootstrap script instead.

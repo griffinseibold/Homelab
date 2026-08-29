@@ -60,13 +60,16 @@ Ubuntu Host
         ├── Two worker nodes
         ├── Flux controllers
         │   └── Reconcile kubernetes/clusters/dev from Git
+        ├── Envoy Gateway controller and data plane
+        │   └── Shared HTTP Gateway exposed on localhost:8080
         └── hello-crud application
+            ├── HTTPRoute attached to the shared Gateway
             └── SQLite database on a persistent volume
 ```
 
 The `homelab-lab` Kind configuration exists, but that cluster is not currently
-bootstrapped with Flux or included in the active workflow. Gateway API,
-observability, and local LLM serving remain roadmap items.
+bootstrapped with Flux or included in the active workflow. Observability and
+local LLM serving remain roadmap items.
 
 ## Repository Structure
 
@@ -100,7 +103,10 @@ homelab/
     ├── clusters/
     │   └── dev/
     │       ├── applications/
+    │       ├── infrastructure/
     │       └── flux-system/
+    ├── infrastructure/
+    │   └── gateway-api/
     └── kind/
         ├── dev.yaml
         └── lab.yaml
@@ -120,14 +126,17 @@ install Docker, Kubernetes command-line tools, Helm, Kind, and Flux.
 
 ### `kubernetes/`
 
-Contains Kind cluster definitions, Flux bootstrap resources, and declarative
-application resources. Application manifests use a base-and-overlay structure:
+Contains Kind cluster definitions, Flux bootstrap resources, infrastructure,
+and declarative application resources. Application manifests use a
+base-and-overlay structure:
 
 * `kubernetes/applications/<name>/base` contains reusable resources.
 * `kubernetes/applications/<name>/overlays/<cluster>` contains cluster-specific
   changes such as image tags or replica counts.
 * `kubernetes/clusters/<cluster>/applications` tells Flux which overlays that
   cluster should reconcile.
+* `kubernetes/infrastructure` contains shared platform components and their
+  cluster-specific configuration.
 
 ### `scripts/`
 
@@ -146,12 +155,13 @@ Contains the two entry points for recreating the current environment:
 | Docker daemon | Whenever the Kind cluster is running |
 | `./scripts/bootstrap-dev.sh` | To create or verify the dev cluster and load local images |
 | Flux controllers | Run automatically inside `homelab-dev` |
+| Envoy Gateway | Installed and reconciled automatically by Flux |
+| Shared `homelab` Gateway | Routes host port 8080 to attached application routes |
 | `hello-crud-data` volume | Provisioned automatically and retained across pod restarts |
-| `kubectl port-forward` | Only while accessing `hello-crud` from the host |
 
 Flux polls Git and reconciles the cluster without a local process running in a
-terminal. The only interactive long-running command in the current workflow is
-`kubectl port-forward`.
+terminal. No interactive long-running process is required to reach
+`hello-crud`.
 
 ## Bootstrap a Fresh Dev Environment
 
@@ -191,11 +201,19 @@ The dev script:
 * builds each manifest's declared image and loads it into Kind;
 * skips Flux bootstrap when Flux is already healthy;
 * asks for `GITHUB_TOKEN` only when a fresh cluster needs Flux bootstrap;
-* waits until Flux and every declared dev application are ready.
+* waits until Flux, infrastructure, Gateway routes, and every declared dev
+  application are ready.
 
 Both scripts are safe to rerun. They do not delete or recreate an existing
 cluster. A token entered at the prompt exists only in the script process and is
 not written to this repository or the cluster.
+
+The Gateway's `127.0.0.1:8080` port mapping is created with the Kind node. If an
+existing `homelab-dev` cluster predates that mapping, the bootstrap script keeps
+the cluster and prints a temporary URL using the control-plane node address.
+Recreating the cluster enables the stable localhost URL, but deleting a Kind
+cluster also deletes its cluster-local persistent volumes; preserve any needed
+data first.
 
 ## Updating the Application
 
@@ -226,11 +244,29 @@ flux reconcile kustomization hello-crud \
   --context kind-homelab-dev
 ```
 
-Until a Gateway is available, reach the service with port forwarding:
+Reach the application through its Gateway API `HTTPRoute`:
 
 ```bash
-kubectl --context kind-homelab-dev \
-  -n hello-crud port-forward service/hello-crud 8080:80
+curl --noproxy '*' http://localhost:8080/healthz
+curl --noproxy '*' http://localhost:8080/items
+```
+
+For a retained cluster that predates the localhost port mapping, use its Kind
+node address with the fixed Gateway NodePort:
+
+```bash
+gateway_address="$(kubectl --context kind-homelab-dev \
+  get node homelab-dev-control-plane \
+  -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')"
+curl --noproxy '*' "http://${gateway_address}:30080/healthz"
+```
+
+Inspect the controller, shared Gateway, and application route with:
+
+```bash
+flux get kustomizations --context kind-homelab-dev
+kubectl --context kind-homelab-dev get gatewayclasses
+kubectl --context kind-homelab-dev get gateways,httproutes --all-namespaces
 ```
 
 ## Persistent Storage
@@ -324,7 +360,7 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [X] Add GitOps
 * [X] Deploy a sample application
 * [X] Add persistent application storage
-* [ ] Add Gateway API
+* [X] Add Gateway API
 * [ ] Add Prometheus
 * [ ] Add Grafana
 * [ ] Add centralized logging
@@ -390,6 +426,8 @@ Build and load local application images
 Bootstrap Flux
         ↓
 GitOps reconciles infrastructure
+        ↓
+Gateway routes become ready
         ↓
 Environment restored
 ```

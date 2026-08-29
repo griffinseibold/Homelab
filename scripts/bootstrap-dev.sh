@@ -7,6 +7,8 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cluster_name="homelab-dev"
 cluster_context="kind-homelab-dev"
 cluster_config="${repository_root}/kubernetes/kind/dev.yaml"
+gateway_node_port="30080"
+gateway_host_port="8080"
 
 require_command() {
   local command_name="$1"
@@ -88,8 +90,18 @@ bootstrap_flux() {
   fi
 }
 
-wait_for_flux_applications() {
-  local manifests=("${repository_root}"/kubernetes/clusters/dev/applications/*.yaml)
+wait_for_flux_kustomizations() {
+  local infrastructure_manifests=(
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/gateway-api-controller.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/gateway-api-config.yaml"
+  )
+  local application_manifests=(
+    "${repository_root}"/kubernetes/clusters/dev/applications/*.yaml
+  )
+  local manifests=(
+    "${infrastructure_manifests[@]}"
+    "${application_manifests[@]}"
+  )
   local manifest_path
   local manifest_name
   local kustomization_name
@@ -110,13 +122,72 @@ wait_for_flux_applications() {
       exit 1
     fi
 
-    kubectl --context "${cluster_context}" --namespace flux-system \
-      wait "kustomization/${kustomization_name}" \
-      --for=condition=Ready --timeout=5m
+    flux reconcile kustomization "${kustomization_name}" \
+      --context "${cluster_context}" \
+      --timeout=15m
   done
 }
 
-for required_command in docker kind kubectl flux; do
+gateway_host_port_is_mapped() {
+  docker port "${cluster_name}-control-plane" \
+    "${gateway_node_port}/tcp" 2>/dev/null \
+    | awk -F: -v expected_port="${gateway_host_port}" '
+        $NF == expected_port { found = 1 }
+        END { exit !found }
+      '
+}
+
+gateway_url() {
+  local node_address
+
+  if gateway_host_port_is_mapped; then
+    printf 'http://localhost:%s' "${gateway_host_port}"
+    return
+  fi
+
+  node_address="$(
+    kubectl --context "${cluster_context}" \
+      get node "${cluster_name}-control-plane" \
+      -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'
+  )"
+  printf 'http://%s:%s' "${node_address}" "${gateway_node_port}"
+}
+
+wait_for_gateway_api() {
+  kubectl --context "${cluster_context}" \
+    wait gatewayclass/homelab \
+    --for=condition=Accepted --timeout=5m
+  kubectl --context "${cluster_context}" --namespace gateway-system \
+    wait gateway/homelab \
+    --for=condition=Programmed --timeout=5m
+  kubectl --context "${cluster_context}" --namespace hello-crud \
+    wait httproute/hello-crud \
+    --for="jsonpath={.status.parents[0].conditions[?(@.type=='Accepted')].status}=True" \
+    --timeout=5m
+  kubectl --context "${cluster_context}" --namespace hello-crud \
+    wait httproute/hello-crud \
+    --for="jsonpath={.status.parents[0].conditions[?(@.type=='ResolvedRefs')].status}=True" \
+    --timeout=5m
+}
+
+wait_for_gateway_endpoint() {
+  local endpoint
+  local deadline
+
+  endpoint="$(gateway_url)/healthz"
+  deadline=$((SECONDS + 60))
+
+  until curl --noproxy '*' --fail --silent --max-time 2 \
+    "${endpoint}" >/dev/null; do
+    if (( SECONDS >= deadline )); then
+      echo "Gateway endpoint did not become ready: ${endpoint}" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+for required_command in curl docker kind kubectl flux; do
   require_command "${required_command}"
 done
 
@@ -128,6 +199,10 @@ fi
 
 if kind get clusters | grep -Fxq "${cluster_name}"; then
   echo "Kind cluster ${cluster_name} already exists."
+  if ! gateway_host_port_is_mapped; then
+    echo "This cluster predates the localhost Gateway port mapping."
+    echo "Bootstrap will use its Kind node address without recreating the cluster."
+  fi
 else
   echo "Creating Kind cluster ${cluster_name}..."
   kind create cluster --config "${cluster_config}"
@@ -140,19 +215,27 @@ kubectl --context "${cluster_context}" \
 build_and_load_local_images
 bootstrap_flux
 
-echo "Waiting for Flux reconciliation..."
-kubectl --context "${cluster_context}" --namespace flux-system \
-  wait kustomization/flux-system --for=condition=Ready --timeout=5m
-wait_for_flux_applications
+echo "Reconciling the latest Git revision..."
+flux reconcile kustomization flux-system \
+  --with-source \
+  --context "${cluster_context}" \
+  --timeout=10m
+
+echo "Waiting for infrastructure and applications..."
+wait_for_flux_kustomizations
+wait_for_gateway_api
+wait_for_gateway_endpoint
 
 echo
 echo "Dev environment is ready."
 flux get all --all-namespaces --context "${cluster_context}"
 kubectl --context "${cluster_context}" \
   get deployments,pods,services --all-namespaces
+kubectl --context "${cluster_context}" \
+  get gatewayclasses.gateway.networking.k8s.io
+kubectl --context "${cluster_context}" \
+  get gateways.gateway.networking.k8s.io,httproutes.gateway.networking.k8s.io \
+  --all-namespaces
 echo
-if kubectl --context "${cluster_context}" --namespace hello-crud \
-  get service/hello-crud >/dev/null 2>&1; then
-  echo "Access hello-crud with:"
-  echo "kubectl --context ${cluster_context} -n hello-crud port-forward service/hello-crud 8080:80"
-fi
+echo "Access hello-crud through the Gateway:"
+echo "curl --noproxy '*' $(gateway_url)/healthz"

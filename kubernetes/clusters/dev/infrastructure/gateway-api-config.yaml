@@ -1,17 +1,18 @@
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
-  name: hello-crud
+  name: gateway-api-config
   namespace: flux-system
 spec:
   dependsOn:
-    - name: gateway-api-config
+    - name: gateway-api-controller
   interval: 10m
   retryInterval: 1m
-  timeout: 2m
-  path: ./kubernetes/applications/hello-crud/overlays/dev
+  timeout: 5m
+  path: ./kubernetes/infrastructure/gateway-api/overlays/dev
   prune: true
   wait: true
   sourceRef:
     kind: GitRepository
     name: flux-system
+
