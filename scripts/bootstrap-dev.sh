@@ -238,4 +238,6 @@ kubectl --context "${cluster_context}" \
 echo
 echo "Access hello-crud through the Gateway:"
 echo "curl --noproxy '*' $(gateway_url)/healthz"
-echo "Access Grafana at http://grafana.localhost:8080 (admin / prom-operator)"
+echo "Access Grafana at http://grafana.localhost:8080"
+echo "Read the generated Grafana login with:"
+echo "kubectl --context ${cluster_context} -n monitoring get secret kube-prometheus-stack-grafana -o go-template='user: {{ index .data \"admin-user\" | base64decode }}{{ \"\\n\" }}password: {{ index .data \"admin-password\" | base64decode }}{{ \"\\n\" }}'"

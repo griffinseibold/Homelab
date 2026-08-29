@@ -306,10 +306,23 @@ Grafana is reachable through the shared Gateway at
 <http://grafana.localhost:8080>. Names ending in `.localhost` resolve to
 `127.0.0.1` on Ubuntu, so no hosts-file entry is needed. The shared Gateway
 routes by hostname: the Grafana `HTTPRoute` claims `grafana.localhost`, while
-`hello-crud` remains the catch-all for other hostnames. Grafana uses the
-chart's default `admin` / `prom-operator` login; replacing it belongs to the
-secrets-management roadmap step, and the Gateway listens only on
-`127.0.0.1`. User-created dashboards persist on a 1 Gi volume.
+`hello-crud` remains the catch-all for other hostnames. User-created
+dashboards persist on a 1 Gi volume.
+
+The chart generates the Grafana admin credentials into a cluster Secret, so
+they change on every fresh install. Read them with:
+
+```bash
+kubectl --context kind-homelab-dev -n monitoring \
+  get secret kube-prometheus-stack-grafana \
+  -o go-template='user: {{ index .data "admin-user" | base64decode }}
+password: {{ index .data "admin-password" | base64decode }}
+'
+```
+
+Managing this credential declaratively belongs to the secrets-management
+roadmap step. Until then the exposure is limited: the Gateway listens only on
+`127.0.0.1`.
 
 Prometheus discovers `ServiceMonitor` and `PodMonitor` resources in every
 namespace, so future applications can expose metrics by shipping a monitor
