@@ -63,15 +63,16 @@ Ubuntu Host
         ├── Envoy Gateway controller and data plane
         │   └── Shared HTTP Gateway exposed on localhost:8080
         ├── kube-prometheus-stack
-        │   └── Prometheus metrics with 7-day persistent retention
+        │   ├── Prometheus metrics with 7-day persistent retention
+        │   └── Grafana dashboards on grafana.localhost:8080
         └── hello-crud application
             ├── HTTPRoute attached to the shared Gateway
             └── SQLite database on a persistent volume
 ```
 
 The `homelab-lab` Kind configuration exists, but that cluster is not currently
-bootstrapped with Flux or included in the active workflow. Grafana, centralized
-logging, and local LLM serving remain roadmap items.
+bootstrapped with Flux or included in the active workflow. Centralized
+logging and local LLM serving remain roadmap items.
 
 ## Repository Structure
 
@@ -298,8 +299,17 @@ kubectl --context kind-homelab-dev get persistentvolume
 Flux installs the `kube-prometheus-stack` Helm chart into the `monitoring`
 namespace. This provides the Prometheus Operator, a Prometheus instance with
 seven days of retention on a 5 Gi persistent volume, Alertmanager,
-node-exporter on every node, and kube-state-metrics. Grafana is disabled until
-its roadmap step.
+node-exporter on every node, kube-state-metrics, and Grafana with its bundled
+Kubernetes dashboards.
+
+Grafana is reachable through the shared Gateway at
+<http://grafana.localhost:8080>. Names ending in `.localhost` resolve to
+`127.0.0.1` on Ubuntu, so no hosts-file entry is needed. The shared Gateway
+routes by hostname: the Grafana `HTTPRoute` claims `grafana.localhost`, while
+`hello-crud` remains the catch-all for other hostnames. Grafana uses the
+chart's default `admin` / `prom-operator` login; replacing it belongs to the
+secrets-management roadmap step, and the Gateway listens only on
+`127.0.0.1`. User-created dashboards persist on a 1 Gi volume.
 
 Prometheus discovers `ServiceMonitor` and `PodMonitor` resources in every
 namespace, so future applications can expose metrics by shipping a monitor
@@ -391,7 +401,7 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [X] Add persistent application storage
 * [X] Add Gateway API
 * [X] Add Prometheus
-* [ ] Add Grafana
+* [X] Add Grafana
 * [ ] Add centralized logging
 * [X] Validate complete cluster rebuilds
 * [ ] Validate AMD GPU acceleration

@@ -160,19 +160,25 @@ wait_for_gateway_api() {
     wait httproute/hello-crud \
     --for="jsonpath={.status.parents[0].conditions[?(@.type=='ResolvedRefs')].status}=True" \
     --timeout=5m
+  kubectl --context "${cluster_context}" --namespace monitoring \
+    wait httproute/grafana \
+    --for="jsonpath={.status.parents[0].conditions[?(@.type=='Accepted')].status}=True" \
+    --timeout=5m
 }
 
 wait_for_gateway_endpoint() {
+  local host_header="$1"
+  local path="$2"
   local endpoint
   local deadline
 
-  endpoint="$(gateway_url)/healthz"
-  deadline=$((SECONDS + 60))
+  endpoint="$(gateway_url)${path}"
+  deadline=$((SECONDS + 120))
 
   until curl --noproxy '*' --fail --silent --max-time 2 \
-    "${endpoint}" >/dev/null; do
+    --header "Host: ${host_header}" "${endpoint}" >/dev/null; do
     if (( SECONDS >= deadline )); then
-      echo "Gateway endpoint did not become ready: ${endpoint}" >&2
+      echo "Gateway endpoint did not become ready: ${host_header} ${endpoint}" >&2
       return 1
     fi
     sleep 2
@@ -216,7 +222,8 @@ flux reconcile kustomization flux-system \
 echo "Waiting for infrastructure and applications..."
 wait_for_flux_kustomizations
 wait_for_gateway_api
-wait_for_gateway_endpoint
+wait_for_gateway_endpoint localhost /healthz
+wait_for_gateway_endpoint grafana.localhost /api/health
 
 echo
 echo "Dev environment is ready."
@@ -231,3 +238,4 @@ kubectl --context "${cluster_context}" \
 echo
 echo "Access hello-crud through the Gateway:"
 echo "curl --noproxy '*' $(gateway_url)/healthz"
+echo "Access Grafana at http://grafana.localhost:8080 (admin / prom-operator)"

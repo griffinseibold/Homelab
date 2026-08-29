@@ -4,6 +4,8 @@ metadata:
   name: monitoring
   namespace: flux-system
 spec:
+  dependsOn:
+    - name: gateway-api-config
   interval: 10m
   retryInterval: 2m
   timeout: 15m

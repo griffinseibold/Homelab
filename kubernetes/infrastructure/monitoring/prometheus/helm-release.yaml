@@ -21,9 +21,20 @@ spec:
       name: RetryOnFailure
       retryInterval: 5m
   values:
-    # Grafana is a separate roadmap step.
     grafana:
-      enabled: false
+      enabled: true
+      # The bundled dashboards persist through provisioning, but user-created
+      # dashboards live in Grafana's database, so keep it on a volume. The
+      # Recreate strategy avoids a rolling-update deadlock on the RWO claim.
+      deploymentStrategy:
+        type: Recreate
+      persistence:
+        enabled: true
+        storageClassName: standard
+        size: 1Gi
+      grafana.ini:
+        server:
+          root_url: http://grafana.localhost:8080/
     # These control-plane components bind to localhost inside Kind nodes, so
     # their scrape targets can never be reached and would show as down.
     kubeControllerManager:
