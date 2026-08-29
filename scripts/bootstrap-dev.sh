@@ -85,6 +85,7 @@ wait_for_flux_kustomizations() {
   local infrastructure_manifests=(
     "${repository_root}/kubernetes/clusters/dev/infrastructure/gateway-api-controller.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/gateway-api-config.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/monitoring.yaml"
   )
   local application_manifests=(
     "${repository_root}"/kubernetes/clusters/dev/applications/*.yaml

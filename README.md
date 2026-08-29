@@ -62,14 +62,16 @@ Ubuntu Host
         │   └── Reconcile kubernetes/clusters/dev from Git
         ├── Envoy Gateway controller and data plane
         │   └── Shared HTTP Gateway exposed on localhost:8080
+        ├── kube-prometheus-stack
+        │   └── Prometheus metrics with 7-day persistent retention
         └── hello-crud application
             ├── HTTPRoute attached to the shared Gateway
             └── SQLite database on a persistent volume
 ```
 
 The `homelab-lab` Kind configuration exists, but that cluster is not currently
-bootstrapped with Flux or included in the active workflow. Observability and
-local LLM serving remain roadmap items.
+bootstrapped with Flux or included in the active workflow. Grafana, centralized
+logging, and local LLM serving remain roadmap items.
 
 ## Repository Structure
 
@@ -106,7 +108,8 @@ homelab/
     │       ├── infrastructure/
     │       └── flux-system/
     ├── infrastructure/
-    │   └── gateway-api/
+    │   ├── gateway-api/
+    │   └── monitoring/
     └── kind/
         ├── dev.yaml
         └── lab.yaml
@@ -157,6 +160,8 @@ Contains the two entry points for recreating the current environment:
 | Flux controllers | Run automatically inside `homelab-dev` |
 | Envoy Gateway | Installed and reconciled automatically by Flux |
 | Shared `homelab` Gateway | Routes host port 8080 to attached application routes |
+| kube-prometheus-stack | Installed and reconciled automatically by Flux |
+| `kubectl port-forward` | Only while accessing the Prometheus UI from the host |
 | `hello-crud-data` volume | Provisioned automatically and retained across pod restarts |
 
 Flux polls Git and reconciles the cluster without a local process running in a
@@ -288,6 +293,31 @@ kubectl --context kind-homelab-dev \
 kubectl --context kind-homelab-dev get persistentvolume
 ```
 
+## Monitoring
+
+Flux installs the `kube-prometheus-stack` Helm chart into the `monitoring`
+namespace. This provides the Prometheus Operator, a Prometheus instance with
+seven days of retention on a 5 Gi persistent volume, Alertmanager,
+node-exporter on every node, and kube-state-metrics. Grafana is disabled until
+its roadmap step.
+
+Prometheus discovers `ServiceMonitor` and `PodMonitor` resources in every
+namespace, so future applications can expose metrics by shipping a monitor
+resource alongside their manifests. The control-plane scrape targets that bind
+only to localhost inside Kind nodes (controller manager, scheduler, etcd, and
+kube-proxy) are disabled so the target list stays healthy.
+
+The Prometheus UI is not routed through the shared Gateway yet. Reach it with
+port forwarding:
+
+```bash
+kubectl --context kind-homelab-dev \
+  -n monitoring port-forward \
+  service/kube-prometheus-stack-prometheus 9090:9090
+```
+
+Then open <http://localhost:9090>.
+
 ## Infrastructure Philosophy
 
 ### Everything Possible Should Be Code
@@ -360,7 +390,7 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [X] Deploy a sample application
 * [X] Add persistent application storage
 * [X] Add Gateway API
-* [ ] Add Prometheus
+* [X] Add Prometheus
 * [ ] Add Grafana
 * [ ] Add centralized logging
 * [X] Validate complete cluster rebuilds
