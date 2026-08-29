@@ -363,7 +363,7 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [ ] Add Prometheus
 * [ ] Add Grafana
 * [ ] Add centralized logging
-* [ ] Validate complete cluster rebuilds
+* [X] Validate complete cluster rebuilds
 * [ ] Validate AMD GPU acceleration
 * [ ] Test `llama.cpp` with its Vulkan backend
 * [ ] Test Ollama with ROCm/Vulkan
