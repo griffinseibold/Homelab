@@ -60,34 +60,25 @@ build_and_load_local_images() {
 }
 
 bootstrap_flux() {
-  local prompted_for_token="false"
-  local github_token=""
+  local flux_system_path="${repository_root}/kubernetes/clusters/dev/flux-system"
 
   if flux check --context "${cluster_context}" >/dev/null 2>&1; then
-    echo "Flux is already healthy; skipping bootstrap."
+    echo "Flux is already healthy; skipping install."
     return
   fi
 
   flux check --pre --context "${cluster_context}"
 
-  if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-    read -rsp "GitHub token: " github_token
-    echo
-    export GITHUB_TOKEN="${github_token}"
-    prompted_for_token="true"
-  fi
-
-  flux bootstrap github \
-    --owner=griffinseibold \
-    --repository=Homelab \
-    --branch=main \
-    --path=kubernetes/clusters/dev \
-    --personal \
-    --context="${cluster_context}"
-
-  if [[ "${prompted_for_token}" == "true" ]]; then
-    unset GITHUB_TOKEN
-  fi
+  echo "Installing Flux from the committed manifests..."
+  kubectl --context "${cluster_context}" apply \
+    -f "${flux_system_path}/gotk-components.yaml"
+  kubectl --context "${cluster_context}" wait \
+    --for=condition=Established \
+    crd/gitrepositories.source.toolkit.fluxcd.io \
+    crd/kustomizations.kustomize.toolkit.fluxcd.io \
+    --timeout=2m
+  kubectl --context "${cluster_context}" apply \
+    -f "${flux_system_path}/gotk-sync.yaml"
 }
 
 wait_for_flux_kustomizations() {

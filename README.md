@@ -199,14 +199,13 @@ The dev script:
 * reuses `homelab-dev` if it already exists;
 * discovers dev application overlays with matching local Dockerfiles;
 * builds each manifest's declared image and loads it into Kind;
-* skips Flux bootstrap when Flux is already healthy;
-* asks for `GITHUB_TOKEN` only when a fresh cluster needs Flux bootstrap;
+* installs Flux from the committed manifests when it is not already healthy;
 * waits until Flux, infrastructure, Gateway routes, and every declared dev
   application are ready.
 
-Both scripts are safe to rerun. They do not delete or recreate an existing
-cluster. A token entered at the prompt exists only in the script process and is
-not written to this repository or the cluster.
+Flux syncs this public repository anonymously over HTTPS, so no GitHub token
+or deploy key is required to bootstrap or rebuild the cluster. Both scripts
+are safe to rerun. They do not delete or recreate an existing cluster.
 
 The Gateway's `127.0.0.1:8080` port mapping is created with the Kind node. If an
 existing `homelab-dev` cluster predates that mapping, the bootstrap script keeps
