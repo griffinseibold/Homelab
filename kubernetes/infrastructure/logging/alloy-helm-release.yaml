@@ -23,6 +23,12 @@ spec:
       name: RetryOnFailure
       retryInterval: 5m
   values:
+    controller:
+      # Collect logs on every node, including the tainted control plane.
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
     alloy:
       # Each DaemonSet member tails only the pods on its own node through the
       # kubelet API, so no log line is collected twice.
