@@ -35,6 +35,11 @@ spec:
       grafana.ini:
         server:
           root_url: http://grafana.localhost:8080/
+      additionalDataSources:
+        - name: Loki
+          type: loki
+          access: proxy
+          url: http://loki.monitoring.svc.cluster.local:3100
     # These control-plane components bind to localhost inside Kind nodes, so
     # their scrape targets can never be reached and would show as down.
     kubeControllerManager:

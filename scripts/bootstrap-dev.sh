@@ -47,6 +47,7 @@ wait_for_flux_kustomizations() {
     "${repository_root}/kubernetes/clusters/dev/infrastructure/gateway-api-controller.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/gateway-api-config.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/monitoring.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/logging.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/argocd.yaml"
   )
   local manifests=("${infrastructure_manifests[@]}")

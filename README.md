@@ -65,6 +65,8 @@ Ubuntu Host
         ├── kube-prometheus-stack
         │   ├── Prometheus metrics with 7-day persistent retention
         │   └── Grafana dashboards on grafana.localhost:8080
+        ├── Loki and Alloy
+        │   └── Centralized pod logs with 7-day persistent retention
         ├── Argo CD on argocd.localhost:8080
         │   └── Deploys applications registered from their own repositories
         └── Applications (Argo-managed, not defined in this repository)
@@ -72,8 +74,8 @@ Ubuntu Host
 ```
 
 The `homelab-lab` Kind configuration exists, but that cluster is not currently
-bootstrapped with Flux or included in the active workflow. Centralized
-logging and local LLM serving remain roadmap items.
+bootstrapped with Flux or included in the active workflow. Local LLM serving
+remains a roadmap item.
 
 ## Access
 
@@ -121,6 +123,7 @@ homelab/
     ├── infrastructure/
     │   ├── argocd/
     │   ├── gateway-api/
+    │   ├── logging/
     │   └── monitoring/
     └── kind/
         ├── dev.yaml
@@ -168,6 +171,7 @@ Contains the two entry points for recreating the current environment:
 | Envoy Gateway | Installed and reconciled automatically by Flux |
 | Shared `homelab` Gateway | Routes host port 8080 to attached application routes |
 | kube-prometheus-stack | Installed and reconciled automatically by Flux |
+| Loki and Alloy | Installed and reconciled automatically by Flux |
 | Argo CD | Installed by Flux; deploys registered applications |
 | `kubectl port-forward` | Only while accessing the Prometheus UI from the host |
 
@@ -307,6 +311,15 @@ resource alongside their manifests. The control-plane scrape targets that bind
 only to localhost inside Kind nodes (controller manager, scheduler, etcd, and
 kube-proxy) are disabled so the target list stays healthy.
 
+Loki and an Alloy DaemonSet provide centralized logging in the same
+namespace. Alloy tails every container on its node through the kubelet API and
+pushes the lines to Loki, which keeps seven days of logs on a 10 Gi persistent
+volume. Loki is preconfigured as a Grafana datasource: open Grafana's Explore
+view, pick Loki, and query with LogQL, for example
+`{namespace="hello-crud"}` or `{app="hello-crud"} |= "error"`. Logs survive
+pod restarts and rescheduling, so crash investigations no longer depend on
+`kubectl logs` reaching the right pod in time.
+
 The Prometheus UI is not routed through the shared Gateway yet. Reach it with
 port forwarding:
 
@@ -406,7 +419,7 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [X] Add Grafana
 * [X] Add Argo CD for application delivery
 * [X] Move applications into their own repositories with image-publishing CI
-* [ ] Add centralized logging
+* [X] Add centralized logging
 * [ ] Validate AMD GPU acceleration
 * [ ] Test `llama.cpp` with its Vulkan backend
 * [ ] Test Ollama with ROCm/Vulkan

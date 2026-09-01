@@ -4,5 +4,6 @@ resources:
   - gateway-api-controller.yaml
   - gateway-api-config.yaml
   - monitoring.yaml
+  - logging.yaml
   - argocd.yaml
 
