@@ -86,6 +86,7 @@ wait_for_flux_kustomizations() {
     "${repository_root}/kubernetes/clusters/dev/infrastructure/gateway-api-controller.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/gateway-api-config.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/monitoring.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/argocd.yaml"
   )
   local application_manifests=(
     "${repository_root}"/kubernetes/clusters/dev/applications/*.yaml
@@ -164,6 +165,10 @@ wait_for_gateway_api() {
     wait httproute/grafana \
     --for="jsonpath={.status.parents[0].conditions[?(@.type=='Accepted')].status}=True" \
     --timeout=5m
+  kubectl --context "${cluster_context}" --namespace argocd \
+    wait httproute/argocd \
+    --for="jsonpath={.status.parents[0].conditions[?(@.type=='Accepted')].status}=True" \
+    --timeout=5m
 }
 
 wait_for_gateway_endpoint() {
@@ -224,6 +229,7 @@ wait_for_flux_kustomizations
 wait_for_gateway_api
 wait_for_gateway_endpoint localhost /healthz
 wait_for_gateway_endpoint grafana.localhost /api/health
+wait_for_gateway_endpoint argocd.localhost /healthz
 
 echo
 echo "Dev environment is ready."
@@ -239,5 +245,7 @@ echo
 echo "Access hello-crud through the Gateway:"
 echo "curl --noproxy '*' $(gateway_url)/healthz"
 echo "Access Grafana at http://grafana.localhost:8080"
+echo "Access Argo CD at http://argocd.localhost:8080 (user admin; password below)"
+echo "kubectl --context ${cluster_context} -n argocd get secret argocd-initial-admin-secret -o go-template='{{ index .data \"password\" | base64decode }}{{ \"\\n\" }}'"
 echo "Read the generated Grafana login with:"
 echo "kubectl --context ${cluster_context} -n monitoring get secret kube-prometheus-stack-grafana -o go-template='user: {{ index .data \"admin-user\" | base64decode }}{{ \"\\n\" }}password: {{ index .data \"admin-password\" | base64decode }}{{ \"\\n\" }}'"

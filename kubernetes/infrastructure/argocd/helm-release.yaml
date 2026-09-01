@@ -1,0 +1,31 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: argo-cd
+  namespace: argocd
+spec:
+  interval: 30m
+  releaseName: argo-cd
+  chartRef:
+    kind: OCIRepository
+    name: argo-cd
+  driftDetection:
+    mode: enabled
+  install:
+    crds: CreateReplace
+    remediation:
+      retries: -1
+  upgrade:
+    crds: CreateReplace
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  values:
+    global:
+      domain: argocd.localhost
+    configs:
+      params:
+        # TLS terminates at the shared Gateway; serve plain HTTP behind it.
+        server.insecure: true
+      cm:
+        url: http://argocd.localhost:8080
