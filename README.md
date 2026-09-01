@@ -113,7 +113,8 @@ homelab/
 │
 ├── scripts/
 │   ├── bootstrap-host.sh
-│   └── bootstrap-dev.sh
+│   ├── bootstrap-dev.sh
+│   └── download-models.sh
 │
 └── kubernetes/
     ├── clusters/
@@ -153,12 +154,17 @@ are registered through Argo CD at runtime.
 
 ### `scripts/`
 
-Contains the two entry points for recreating the current environment:
+Contains the entry points for recreating the current environment:
 
 * `bootstrap-host.sh` installs Ansible when needed and configures the Ubuntu
   host.
 * `bootstrap-dev.sh` creates or reuses the dev cluster and installs or
   verifies Flux and the platform.
+* `download-models.sh` fetches and checksum-verifies the model weights the
+  platform serves, into `~/models` (override with `MODELS_DIR`). Weights are
+  multi-gigabyte artifacts that stay out of Git; the script is the
+  declarative record of which models the environment uses. It skips files
+  that are already present and valid, and resumes interrupted downloads.
 
 ## What Needs to Run
 
