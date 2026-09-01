@@ -20,45 +20,6 @@ require_command() {
   fi
 }
 
-build_and_load_local_images() {
-  local overlays=("${repository_root}"/kubernetes/applications/*/overlays/dev)
-  local overlay_path
-  local application_root
-  local application_name
-  local source_path
-  local image_reference
-
-  for overlay_path in "${overlays[@]}"; do
-    application_root="$(dirname "$(dirname "${overlay_path}")")"
-    application_name="$(basename "${application_root}")"
-    source_path="${repository_root}/applications/${application_name}"
-
-    if [[ ! -f "${source_path}/Dockerfile" ]]; then
-      echo "Skipping ${application_name}: no local Dockerfile."
-      continue
-    fi
-
-    image_reference="$(
-      kubectl kustomize "${overlay_path}" \
-        | awk '
-            $1 == "image:" { print $2; exit }
-            $1 == "-" && $2 == "image:" { print $3; exit }
-          '
-    )"
-
-    if [[ -z "${image_reference}" ]]; then
-      echo "Could not determine the image for ${application_name}." >&2
-      exit 1
-    fi
-
-    echo "Building ${image_reference}..."
-    docker build --tag "${image_reference}" "${source_path}"
-
-    echo "Loading ${image_reference} into ${cluster_name}..."
-    kind load docker-image "${image_reference}" --name "${cluster_name}"
-  done
-}
-
 bootstrap_flux() {
   local flux_system_path="${repository_root}/kubernetes/clusters/dev/flux-system"
 
@@ -88,13 +49,7 @@ wait_for_flux_kustomizations() {
     "${repository_root}/kubernetes/clusters/dev/infrastructure/monitoring.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/argocd.yaml"
   )
-  local application_manifests=(
-    "${repository_root}"/kubernetes/clusters/dev/applications/*.yaml
-  )
-  local manifests=(
-    "${infrastructure_manifests[@]}"
-    "${application_manifests[@]}"
-  )
+  local manifests=("${infrastructure_manifests[@]}")
   local manifest_path
   local manifest_name
   local kustomization_name
@@ -153,14 +108,6 @@ wait_for_gateway_api() {
   kubectl --context "${cluster_context}" --namespace gateway-system \
     wait gateway/homelab \
     --for=condition=Programmed --timeout=5m
-  kubectl --context "${cluster_context}" --namespace hello-crud \
-    wait httproute/hello-crud \
-    --for="jsonpath={.status.parents[0].conditions[?(@.type=='Accepted')].status}=True" \
-    --timeout=5m
-  kubectl --context "${cluster_context}" --namespace hello-crud \
-    wait httproute/hello-crud \
-    --for="jsonpath={.status.parents[0].conditions[?(@.type=='ResolvedRefs')].status}=True" \
-    --timeout=5m
   kubectl --context "${cluster_context}" --namespace monitoring \
     wait httproute/grafana \
     --for="jsonpath={.status.parents[0].conditions[?(@.type=='Accepted')].status}=True" \
@@ -215,7 +162,6 @@ echo "Waiting for Kubernetes nodes..."
 kubectl --context "${cluster_context}" \
   wait --for=condition=Ready nodes --all --timeout=2m
 
-build_and_load_local_images
 bootstrap_flux
 
 echo "Reconciling the latest Git revision..."
@@ -224,10 +170,9 @@ flux reconcile kustomization flux-system \
   --context "${cluster_context}" \
   --timeout=10m
 
-echo "Waiting for infrastructure and applications..."
+echo "Waiting for infrastructure..."
 wait_for_flux_kustomizations
 wait_for_gateway_api
-wait_for_gateway_endpoint localhost /healthz
 wait_for_gateway_endpoint grafana.localhost /api/health
 wait_for_gateway_endpoint argocd.localhost /healthz
 
@@ -242,8 +187,8 @@ kubectl --context "${cluster_context}" \
   get gateways.gateway.networking.k8s.io,httproutes.gateway.networking.k8s.io \
   --all-namespaces
 echo
-echo "Access hello-crud through the Gateway:"
-echo "curl --noproxy '*' $(gateway_url)/healthz"
+echo "Applications are registered through Argo CD and are not part of this"
+echo "repository; re-register them in the Argo CD UI after a cluster rebuild."
 echo "Access Grafana at http://grafana.localhost:8080"
 echo "Access Argo CD at http://argocd.localhost:8080 (user admin; password below)"
 echo "kubectl --context ${cluster_context} -n argocd get secret argocd-initial-admin-secret -o go-template='{{ index .data \"password\" | base64decode }}{{ \"\\n\" }}'"

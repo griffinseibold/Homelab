@@ -65,9 +65,10 @@ Ubuntu Host
         ├── kube-prometheus-stack
         │   ├── Prometheus metrics with 7-day persistent retention
         │   └── Grafana dashboards on grafana.localhost:8080
-        └── hello-crud application
-            ├── HTTPRoute attached to the shared Gateway
-            └── SQLite database on a persistent volume
+        ├── Argo CD on argocd.localhost:8080
+        │   └── Deploys applications registered from their own repositories
+        └── Applications (Argo-managed, not defined in this repository)
+            └── hello-crud from github.com/griffinseibold/hello-crud
 ```
 
 The `homelab-lab` Kind configuration exists, but that cluster is not currently
@@ -87,28 +88,17 @@ homelab/
 │   ├── playbooks/
 │   └── roles/
 │
-├── applications/
-│   └── hello-crud/
-│       ├── app.py
-│       ├── tests/
-│       └── Dockerfile
-│
 ├── scripts/
 │   ├── bootstrap-host.sh
 │   └── bootstrap-dev.sh
 │
 └── kubernetes/
-    ├── applications/
-    │   └── hello-crud/
-    │       ├── base/
-    │       │   └── persistent-volume-claim.yaml
-    │       └── overlays/dev/
     ├── clusters/
     │   └── dev/
-    │       ├── applications/
     │       ├── infrastructure/
     │       └── flux-system/
     ├── infrastructure/
+    │   ├── argocd/
     │   ├── gateway-api/
     │   └── monitoring/
     └── kind/
@@ -118,29 +108,24 @@ homelab/
 
 Only paths that currently exist are shown.
 
-### `applications/`
-
-Contains application source code, tests, dependency definitions, and container
-build files. Each application is self-contained under its own directory.
-
 ### `ansible/`
 
 Contains the inventory, playbook, and roles that configure the Ubuntu host and
-install Docker, Kubernetes command-line tools, Helm, Kind, and Flux.
+install Docker, Kubernetes command-line tools, Helm, Kind, Flux, and the
+GitHub CLI.
 
 ### `kubernetes/`
 
-Contains Kind cluster definitions, Flux bootstrap resources, infrastructure,
-and declarative application resources. Application manifests use a
-base-and-overlay structure:
+Contains Kind cluster definitions, Flux bootstrap resources, and the platform
+infrastructure:
 
-* `kubernetes/applications/<name>/base` contains reusable resources.
-* `kubernetes/applications/<name>/overlays/<cluster>` contains cluster-specific
-  changes such as image tags or replica counts.
-* `kubernetes/clusters/<cluster>/applications` tells Flux which overlays that
-  cluster should reconcile.
 * `kubernetes/infrastructure` contains shared platform components and their
   cluster-specific configuration.
+* `kubernetes/clusters/<cluster>` tells Flux what that cluster should
+  reconcile.
+
+Applications are deliberately absent: they live in their own repositories and
+are registered through Argo CD at runtime.
 
 ### `scripts/`
 
@@ -148,8 +133,8 @@ Contains the two entry points for recreating the current environment:
 
 * `bootstrap-host.sh` installs Ansible when needed and configures the Ubuntu
   host.
-* `bootstrap-dev.sh` creates or reuses the dev cluster, builds local application
-  images, loads them into Kind, and bootstraps or verifies Flux.
+* `bootstrap-dev.sh` creates or reuses the dev cluster and installs or
+  verifies Flux and the platform.
 
 ## What Needs to Run
 
@@ -157,17 +142,16 @@ Contains the two entry points for recreating the current environment:
 | --- | --- |
 | `./scripts/bootstrap-host.sh` | Once on a new host, and again when host tooling changes |
 | Docker daemon | Whenever the Kind cluster is running |
-| `./scripts/bootstrap-dev.sh` | To create or verify the dev cluster and load local images |
+| `./scripts/bootstrap-dev.sh` | To create or verify the dev cluster and platform |
 | Flux controllers | Run automatically inside `homelab-dev` |
 | Envoy Gateway | Installed and reconciled automatically by Flux |
 | Shared `homelab` Gateway | Routes host port 8080 to attached application routes |
 | kube-prometheus-stack | Installed and reconciled automatically by Flux |
+| Argo CD | Installed by Flux; deploys registered applications |
 | `kubectl port-forward` | Only while accessing the Prometheus UI from the host |
-| `hello-crud-data` volume | Provisioned automatically and retained across pod restarts |
 
-Flux polls Git and reconciles the cluster without a local process running in a
-terminal. No interactive long-running process is required to reach
-`hello-crud`.
+Flux polls Git and reconciles the platform without a local process running in
+a terminal, and Argo CD does the same for registered applications.
 
 ## Bootstrap a Fresh Dev Environment
 
@@ -203,11 +187,8 @@ Then create or verify the complete dev environment:
 The dev script:
 
 * reuses `homelab-dev` if it already exists;
-* discovers dev application overlays with matching local Dockerfiles;
-* builds each manifest's declared image and loads it into Kind;
 * installs Flux from the committed manifests when it is not already healthy;
-* waits until Flux, infrastructure, Gateway routes, and every declared dev
-  application are ready.
+* waits until Flux, infrastructure, and Gateway routes are ready.
 
 Flux syncs this public repository anonymously over HTTPS, so no GitHub token
 or deploy key is required to bootstrap or rebuild the cluster. Both scripts
@@ -220,53 +201,39 @@ Recreating the cluster enables the stable localhost URL, but deleting a Kind
 cluster also deletes its cluster-local persistent volumes; preserve any needed
 data first.
 
-## Updating the Application
+## Applications
 
-Application source changes do not cause Flux to build a container. The current
-workflow deliberately builds images locally, and each release requires a new
-image tag.
+Applications are not defined in this repository. Each application lives in its
+own repository containing its source, tests, Dockerfile, a Helm chart, and a
+CI workflow that publishes a public container image to GHCR on every version
+tag. `hello-crud` is the reference example:
+<https://github.com/griffinseibold/hello-crud>.
 
-After changing the Python application, update `newTag` in
-`kubernetes/applications/hello-crud/overlays/dev/kustomization.yaml`, then build
-and load the matching tag. For example:
-
-```bash
-docker build \
-  -t ghcr.io/griffinseibold/hello-crud:0.2.1 \
-  applications/hello-crud
-kind load docker-image \
-  ghcr.io/griffinseibold/hello-crud:0.2.1 \
-  --name homelab-dev
-```
-
-Commit and push the source and manifest change. Flux will detect the commit and
-roll out the new image. Reconciliation can be requested immediately instead of
-waiting for the polling interval:
+Argo CD deploys applications. To register one, open
+<http://argocd.localhost:8080>, sign in as `admin` (password below), create an
+Application pointing at the application's repository and chart path, and pick
+a destination namespace. Argo CD then syncs the chart continuously, shows
+health and history, and allows scaling by overriding the chart's
+`replicaCount` value from the UI.
 
 ```bash
-flux reconcile kustomization hello-crud \
-  --with-source \
-  --context kind-homelab-dev
+kubectl --context kind-homelab-dev -n argocd \
+  get secret argocd-initial-admin-secret \
+  -o go-template='{{ index .data "password" | base64decode }}
+'
 ```
 
-Reach the application through its Gateway API `HTTPRoute`:
+For an application to be reachable through the shared Gateway, its chart must
+provide an `HTTPRoute` attached to the `homelab` Gateway and label its
+namespace with `gateway.homelab/access: public`. Routes claim a hostname such
+as `hello-crud.localhost`, or attach with no hostname to act as the catch-all.
 
-```bash
-curl --noproxy '*' http://localhost:8080/healthz
-curl --noproxy '*' http://localhost:8080/items
-```
+Applications registered through the UI are cluster state, not Git state: after
+a full cluster rebuild they must be registered again. The platform accepts
+this trade-off so that this repository never has to know which applications
+exist.
 
-For a retained cluster that predates the localhost port mapping, use its Kind
-node address with the fixed Gateway NodePort:
-
-```bash
-gateway_address="$(kubectl --context kind-homelab-dev \
-  get node homelab-dev-control-plane \
-  -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')"
-curl --noproxy '*' "http://${gateway_address}:30080/healthz"
-```
-
-Inspect the controller, shared Gateway, and application route with:
+Inspect the platform and every attached route with:
 
 ```bash
 flux get kustomizations --context kind-homelab-dev
@@ -276,21 +243,20 @@ kubectl --context kind-homelab-dev get gateways,httproutes --all-namespaces
 
 ## Persistent Storage
 
-`hello-crud` stores its items in a SQLite database at `/data/hello-crud.db`.
-The `hello-crud-data` claim requests 1 Gi from Kind's default `standard`
-local-path storage class and mounts it at `/data`.
+Workloads claim storage from Kind's default `standard` local-path storage
+class. Prometheus metrics, Grafana dashboards, and application data such as
+hello-crud's SQLite database all persist this way.
 
-The data survives application rollouts, pod deletion, and Kind node-container
-restarts. It does not survive deleting the entire Kind cluster because the
-volume resides inside a Kind node. Storage that survives complete cluster
-rebuilds remains a separate requirement for model files and other important
-data.
+The data survives rollouts, pod deletion, and Kind node-container restarts. It
+does not survive deleting the entire Kind cluster because the volumes reside
+inside Kind nodes. Storage that survives complete cluster rebuilds remains a
+separate requirement for model files and other important data.
 
-Inspect the claim and dynamically provisioned volume with:
+Inspect the claims and dynamically provisioned volumes with:
 
 ```bash
 kubectl --context kind-homelab-dev \
-  -n hello-crud get persistentvolumeclaim
+  get persistentvolumeclaims --all-namespaces
 kubectl --context kind-homelab-dev get persistentvolume
 ```
 
@@ -305,9 +271,9 @@ Kubernetes dashboards.
 Grafana is reachable through the shared Gateway at
 <http://grafana.localhost:8080>. Names ending in `.localhost` resolve to
 `127.0.0.1` on Ubuntu, so no hosts-file entry is needed. The shared Gateway
-routes by hostname: the Grafana `HTTPRoute` claims `grafana.localhost`, while
-`hello-crud` remains the catch-all for other hostnames. User-created
-dashboards persist on a 1 Gi volume.
+routes by hostname: for example the Grafana `HTTPRoute` claims
+`grafana.localhost`, and an application route with no hostname acts as the
+catch-all. User-created dashboards persist on a 1 Gi volume.
 
 The chart generates the Grafana admin credentials into a cluster Secret, so
 they change on every fresh install. Read them with:
@@ -415,6 +381,8 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [X] Add Gateway API
 * [X] Add Prometheus
 * [X] Add Grafana
+* [X] Add Argo CD for application delivery
+* [X] Move applications into their own repositories with image-publishing CI
 * [ ] Add centralized logging
 * [X] Validate complete cluster rebuilds
 * [ ] Validate AMD GPU acceleration
@@ -434,7 +402,7 @@ proving that the host can run a useful local LLM.
 * GitOps reconciliation and recovery from configuration drift
 * Application rollouts, rollbacks, health checks, and failure recovery
 * Resource requests, limits, scheduling, and pod disruption
-* Reusing application bases across cluster-specific Kustomize overlays
+* Registering, scaling, and rolling back applications through Argo CD
 * Persistent storage behavior across application and cluster restarts
 * Gateway API routing to services inside the cluster
 * Metrics, dashboards, and centralized application logs
@@ -473,13 +441,13 @@ Run Ansible host bootstrap
         ↓
 Create the dev Kind cluster
         ↓
-Build and load local application images
+Install Flux
         ↓
-Bootstrap Flux
-        ↓
-GitOps reconciles infrastructure
+GitOps reconciles the platform
         ↓
 Gateway routes become ready
+        ↓
+Register applications in Argo CD
         ↓
 Environment restored
 ```
