@@ -15,6 +15,23 @@
       - unzip
     state: present
 
+# Kind nodes share the host kernel, and Ubuntu's default inotify limits are
+# too low for the kubelet log tailing that centralized logging relies on.
+# These are the values recommended by Kind's known-issues documentation.
+- name: Raise inotify limits for Kind log tailing
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-homelab-inotify.conf
+    mode: "0644"
+    content: |
+      fs.inotify.max_user_watches = 524288
+      fs.inotify.max_user_instances = 512
+  register: inotify_sysctl
+
+- name: Apply sysctl settings
+  ansible.builtin.command:
+    cmd: sysctl --system
+  when: inotify_sysctl.changed
+
 - name: Ensure apt keyrings directory exists
   ansible.builtin.file:
     path: /etc/apt/keyrings
