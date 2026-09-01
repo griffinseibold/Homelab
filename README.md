@@ -52,7 +52,7 @@ The repository currently builds and manages this environment:
 Ubuntu Host
 │
 ├── Ansible
-│   └── Installs Docker, kubectl, Helm, Kind, and the Flux CLI
+│   └── Installs Docker, kubectl, Helm, Kind, Flux, and the GitHub CLI
 │
 └── Docker
     └── Kind cluster: homelab-dev
@@ -74,6 +74,27 @@ Ubuntu Host
 The `homelab-lab` Kind configuration exists, but that cluster is not currently
 bootstrapped with Flux or included in the active workflow. Centralized
 logging and local LLM serving remain roadmap items.
+
+## Access
+
+The web UIs are served through the shared Gateway on `127.0.0.1:8080`, except
+Prometheus, which is reached with a port-forward. Names ending in
+`.localhost` resolve to `127.0.0.1` on Ubuntu, so no hosts-file entries are
+needed.
+
+| Service | URL | Login |
+| --- | --- | --- |
+| Argo CD | <http://argocd.localhost:8080> | `admin`; password from the command below |
+| Grafana | <http://grafana.localhost:8080> | Generated credentials; command in [Monitoring](#monitoring) |
+| Registered applications | Their claimed hostname, or <http://localhost:8080> for the catch-all route | Application-specific |
+| Prometheus | <http://localhost:9090> while port forwarding; command in [Monitoring](#monitoring) | None |
+
+```bash
+kubectl --context kind-homelab-dev -n argocd \
+  get secret argocd-initial-admin-secret \
+  -o go-template='{{ index .data "password" | base64decode }}
+'
+```
 
 ## Repository Structure
 
@@ -194,12 +215,11 @@ Flux syncs this public repository anonymously over HTTPS, so no GitHub token
 or deploy key is required to bootstrap or rebuild the cluster. Both scripts
 are safe to rerun. They do not delete or recreate an existing cluster.
 
-The Gateway's `127.0.0.1:8080` port mapping is created with the Kind node. If an
-existing `homelab-dev` cluster predates that mapping, the bootstrap script keeps
-the cluster and prints a temporary URL using the control-plane node address.
-Recreating the cluster enables the stable localhost URL, but deleting a Kind
-cluster also deletes its cluster-local persistent volumes; preserve any needed
-data first.
+The Gateway's `127.0.0.1:8080` port mapping is created with the Kind node, so
+it exists on any cluster the current configuration creates. For an older
+cluster without the mapping, the script falls back to the control-plane node
+address instead of recreating the cluster, because deleting a Kind cluster
+also deletes its persistent volumes.
 
 ## Applications
 
@@ -209,19 +229,11 @@ CI workflow that publishes a public container image to GHCR on every version
 tag. `hello-crud` is the reference example:
 <https://github.com/griffinseibold/hello-crud>.
 
-Argo CD deploys applications. To register one, open
-<http://argocd.localhost:8080>, sign in as `admin` (password below), create an
-Application pointing at the application's repository and chart path, and pick
-a destination namespace. Argo CD then syncs the chart continuously, shows
-health and history, and allows scaling by overriding the chart's
-`replicaCount` value from the UI.
-
-```bash
-kubectl --context kind-homelab-dev -n argocd \
-  get secret argocd-initial-admin-secret \
-  -o go-template='{{ index .data "password" | base64decode }}
-'
-```
+Argo CD deploys applications. To register one, open the Argo CD UI (see
+[Access](#access)), create an Application pointing at the application's
+repository and chart path, and pick a destination namespace. Argo CD then
+syncs the chart continuously, shows health and history, and allows scaling by
+overriding the chart's `replicaCount` value from the UI.
 
 For an application to be reachable through the shared Gateway, its chart must
 provide an `HTTPRoute` attached to the `homelab` Gateway and label its
@@ -269,11 +281,10 @@ node-exporter on every node, kube-state-metrics, and Grafana with its bundled
 Kubernetes dashboards.
 
 Grafana is reachable through the shared Gateway at
-<http://grafana.localhost:8080>. Names ending in `.localhost` resolve to
-`127.0.0.1` on Ubuntu, so no hosts-file entry is needed. The shared Gateway
-routes by hostname: for example the Grafana `HTTPRoute` claims
-`grafana.localhost`, and an application route with no hostname acts as the
-catch-all. User-created dashboards persist on a 1 Gi volume.
+<http://grafana.localhost:8080>. The Gateway routes by hostname: the Grafana
+`HTTPRoute` claims `grafana.localhost`, and an application route with no
+hostname acts as the catch-all. User-created dashboards persist on a 1 Gi
+volume.
 
 The chart generates the Grafana admin credentials into a cluster Secret, so
 they change on every fresh install. Read them with:
@@ -347,6 +358,17 @@ Direct manual modification of cluster resources should primarily be used for tro
 
 Any permanent change should eventually be represented in Git.
 
+### Applications Are the Deliberate Exception
+
+The platform — everything in this repository — follows the rule above
+strictly. Applications do not: they are registered through the Argo CD UI at
+runtime, and which applications run on the cluster is cluster state rather
+than platform Git state. Each application is still GitOps-managed, but
+against its own repository: Argo CD continuously syncs every registered
+application from the chart in that application's repository. The platform
+trades rebuild-time convenience (re-registering applications after a rebuild)
+for a platform that never has to know which applications exist.
+
 ## Secrets
 
 Plaintext secrets must **not** be committed to this repository.
@@ -379,12 +401,12 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [X] Deploy a sample application
 * [X] Add persistent application storage
 * [X] Add Gateway API
+* [X] Validate complete cluster rebuilds
 * [X] Add Prometheus
 * [X] Add Grafana
 * [X] Add Argo CD for application delivery
 * [X] Move applications into their own repositories with image-publishing CI
 * [ ] Add centralized logging
-* [X] Validate complete cluster rebuilds
 * [ ] Validate AMD GPU acceleration
 * [ ] Test `llama.cpp` with its Vulkan backend
 * [ ] Test Ollama with ROCm/Vulkan
@@ -456,6 +478,10 @@ If rebuilding the environment requires undocumented manual configuration, that c
 
 ## Status
 
-**Early development**
+**Working platform, actively evolving**
 
-The host environment and repository structure are currently being established. Infrastructure, Kubernetes configuration, and distributed workloads will be added incrementally.
+The host bootstrap, GitOps-managed platform (Gateway, monitoring, Argo CD),
+and the application-delivery workflow are in place, and a complete
+destroy-and-rebuild of the cluster has been validated from this repository.
+Current work is tracked in the [Roadmap](#roadmap); centralized logging and
+the local LLM platform are next.
