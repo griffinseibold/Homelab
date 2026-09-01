@@ -420,10 +420,10 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [X] Add Argo CD for application delivery
 * [X] Move applications into their own repositories with image-publishing CI
 * [X] Add centralized logging
-* [ ] Validate AMD GPU acceleration
-* [ ] Test `llama.cpp` with its Vulkan backend
+* [X] Validate AMD GPU acceleration
+* [X] Test `llama.cpp` with its Vulkan backend
 * [ ] Test Ollama with ROCm/Vulkan
-* [ ] Select a quantized 7B/8B instruct model
+* [X] Select a quantized 7B/8B instruct model (Qwen3-8B Q4_K_M)
 * [ ] Create persistent model storage
 * [ ] Connect a simple client or chat UI
 
