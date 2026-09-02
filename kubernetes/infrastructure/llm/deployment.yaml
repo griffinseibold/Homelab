@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-server
+  labels:
+    app.kubernetes.io/name: llama-server
+spec:
+  # One GPU, one server. Additional models become additional deployments.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llama-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llama-server
+    spec:
+      containers:
+        - name: llama-server
+          image: ghcr.io/ggml-org/llama.cpp:server-vulkan-b10731
+          args:
+            - --model
+            - /models/Qwen3-8B-Q4_K_M.gguf
+            - --n-gpu-layers
+            - "99"
+            - --ctx-size
+            - "8192"
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8080"
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            # Direct /dev/dri access for the Vulkan backend; Kind has no GPU
+            # device plugin, so the device is reached through a privileged
+            # hostPath mount.
+            privileged: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              memory: 12Gi
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: dri
+              mountPath: /dev/dri
+      volumes:
+        - name: models
+          hostPath:
+            path: /models
+            type: Directory
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory

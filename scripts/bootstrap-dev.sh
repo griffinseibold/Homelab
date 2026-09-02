@@ -49,6 +49,8 @@ wait_for_flux_kustomizations() {
     "${repository_root}/kubernetes/clusters/dev/infrastructure/monitoring.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/logging.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/argocd.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/llm.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/chat.yaml"
   )
   local manifests=("${infrastructure_manifests[@]}")
   local manifest_path
@@ -117,6 +119,14 @@ wait_for_gateway_api() {
     wait httproute/argocd \
     --for="jsonpath={.status.parents[0].conditions[?(@.type=='Accepted')].status}=True" \
     --timeout=5m
+  kubectl --context "${cluster_context}" --namespace llm \
+    wait httproute/llm \
+    --for="jsonpath={.status.parents[0].conditions[?(@.type=='Accepted')].status}=True" \
+    --timeout=5m
+  kubectl --context "${cluster_context}" --namespace chat \
+    wait httproute/open-webui \
+    --for="jsonpath={.status.parents[0].conditions[?(@.type=='Accepted')].status}=True" \
+    --timeout=5m
 }
 
 wait_for_gateway_endpoint() {
@@ -176,6 +186,8 @@ wait_for_flux_kustomizations
 wait_for_gateway_api
 wait_for_gateway_endpoint grafana.localhost /api/health
 wait_for_gateway_endpoint argocd.localhost /healthz
+wait_for_gateway_endpoint llm.localhost /health
+wait_for_gateway_endpoint chat.localhost /health
 
 echo
 echo "Dev environment is ready."
@@ -190,6 +202,8 @@ kubectl --context "${cluster_context}" \
 echo
 echo "Applications are registered through Argo CD and are not part of this"
 echo "repository; re-register them in the Argo CD UI after a cluster rebuild."
+echo "Access the chat UI at http://chat.localhost:8080"
+echo "Access the LLM API at http://llm.localhost:8080/v1"
 echo "Access Grafana at http://grafana.localhost:8080"
 echo "Access Argo CD at http://argocd.localhost:8080 (user admin; password below)"
 echo "kubectl --context ${cluster_context} -n argocd get secret argocd-initial-admin-secret -o go-template='{{ index .data \"password\" | base64decode }}{{ \"\\n\" }}'"

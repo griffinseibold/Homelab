@@ -3,6 +3,9 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: homelab-dev
 
+# The worker mounts expose the host's AMD GPU (/dev/dri) and the model
+# weights directory (populated by scripts/download-models.sh) to workloads.
+# Model files live on the host so they survive complete cluster rebuilds.
 nodes:
   - role: control-plane
     extraPortMappings:
@@ -12,5 +15,17 @@ nodes:
         protocol: TCP
 
   - role: worker
+    extraMounts:
+      - hostPath: /home/griffin-seibold/models
+        containerPath: /models
+        readOnly: true
+      - hostPath: /dev/dri
+        containerPath: /dev/dri
 
   - role: worker
+    extraMounts:
+      - hostPath: /home/griffin-seibold/models
+        containerPath: /models
+        readOnly: true
+      - hostPath: /dev/dri
+        containerPath: /dev/dri

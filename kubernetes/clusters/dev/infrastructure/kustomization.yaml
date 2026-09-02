@@ -6,4 +6,6 @@ resources:
   - monitoring.yaml
   - logging.yaml
   - argocd.yaml
+  - llm.yaml
+  - chat.yaml
 

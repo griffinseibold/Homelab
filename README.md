@@ -67,6 +67,10 @@ Ubuntu Host
         │   └── Grafana dashboards on grafana.localhost:8080
         ├── Loki and Alloy
         │   └── Centralized pod logs with 7-day persistent retention
+        ├── llama.cpp server on llm.localhost:8080
+        │   └── Serves Qwen3-8B on the host GPU via Vulkan
+        ├── Open WebUI on chat.localhost:8080
+        │   └── Chat interface backed by the local LLM API
         ├── Argo CD on argocd.localhost:8080
         │   └── Deploys applications registered from their own repositories
         └── Applications (Argo-managed, not defined in this repository)
@@ -74,8 +78,7 @@ Ubuntu Host
 ```
 
 The `homelab-lab` Kind configuration exists, but that cluster is not currently
-bootstrapped with Flux or included in the active workflow. Local LLM serving
-remains a roadmap item.
+bootstrapped with Flux or included in the active workflow.
 
 ## Access
 
@@ -87,6 +90,8 @@ needed.
 | Service | URL | Login |
 | --- | --- | --- |
 | Argo CD | <http://argocd.localhost:8080> | `admin`; password from the command below |
+| Open WebUI chat | <http://chat.localhost:8080> | First account created becomes the admin |
+| LLM API | <http://llm.localhost:8080/v1> (OpenAI-compatible) | None |
 | Grafana | <http://grafana.localhost:8080> | Generated credentials; command in [Monitoring](#monitoring) |
 | Registered applications | Their claimed hostname, or <http://localhost:8080> for the catch-all route | Application-specific |
 | Prometheus | <http://localhost:9090> while port forwarding; command in [Monitoring](#monitoring) | None |
@@ -123,7 +128,9 @@ homelab/
     │       └── flux-system/
     ├── infrastructure/
     │   ├── argocd/
+    │   ├── chat/
     │   ├── gateway-api/
+    │   ├── llm/
     │   ├── logging/
     │   └── monitoring/
     └── kind/
@@ -179,6 +186,8 @@ Contains the entry points for recreating the current environment:
 | kube-prometheus-stack | Installed and reconciled automatically by Flux |
 | Loki and Alloy | Installed and reconciled automatically by Flux |
 | Argo CD | Installed by Flux; deploys registered applications |
+| llama.cpp server and Open WebUI | Installed and reconciled automatically by Flux |
+| `./scripts/download-models.sh` | Once per model; weights persist on the host across rebuilds |
 | `kubectl port-forward` | Only while accessing the Prometheus UI from the host |
 
 Flux polls Git and reconciles the platform without a local process running in
@@ -337,6 +346,37 @@ kubectl --context kind-homelab-dev \
 
 Then open <http://localhost:9090>.
 
+## LLM Serving
+
+Flux runs a `llama.cpp` server in the `llm` namespace, serving Qwen3-8B
+(Q4_K_M) fully offloaded to the host's RX 6900 XT through the Vulkan backend
+(about 1,200 t/s prompt processing and 85 t/s generation). The server exposes
+an OpenAI-compatible API through the shared Gateway at
+`http://llm.localhost:8080/v1`, so any application or client library that
+speaks the OpenAI protocol can use the local model.
+
+Model weights live on the host in `~/models` (fetched and verified by
+`./scripts/download-models.sh`) and are mounted read-only into the Kind
+workers, so they survive complete cluster rebuilds. The GPU reaches the pod
+through a privileged `/dev/dri` hostPath mount because Kind has no GPU device
+plugin; a real multi-node cluster would use the AMD device plugin instead.
+One GPU means one server replica; additional models would run as additional
+deployments, loaded and unloaded by scaling their replicas.
+
+Open WebUI in the `chat` namespace provides the chat interface at
+<http://chat.localhost:8080>, backed by the same API. It is a progressive web
+app: on a phone, "Add to Home Screen" installs it like a native app. The
+first account registered becomes the administrator, and conversation history
+persists on a 2 Gi volume.
+
+Try the API directly:
+
+```bash
+curl --noproxy '*' http://llm.localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
 ## Infrastructure Philosophy
 
 ### Everything Possible Should Be Code
@@ -430,8 +470,8 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [X] Test `llama.cpp` with its Vulkan backend
 * [ ] Test Ollama with ROCm/Vulkan
 * [X] Select a quantized 7B/8B instruct model (Qwen3-8B Q4_K_M)
-* [ ] Create persistent model storage
-* [ ] Connect a simple client or chat UI
+* [X] Create persistent model storage
+* [X] Connect a simple client or chat UI (Open WebUI)
 
 ## Experiments
 
