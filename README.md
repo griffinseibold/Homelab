@@ -468,7 +468,6 @@ Long-term secrets management may use encrypted Git-managed secrets or an externa
 * [X] Add centralized logging
 * [X] Validate AMD GPU acceleration
 * [X] Test `llama.cpp` with its Vulkan backend
-* [ ] Test Ollama with ROCm/Vulkan
 * [X] Select a quantized 7B/8B instruct model (Qwen3-8B Q4_K_M)
 * [X] Create persistent model storage
 * [X] Connect a simple client or chat UI (Open WebUI)
@@ -493,7 +492,6 @@ proving that the host can run a useful local LLM.
 
 * AMD GPU detection and acceleration on the Radeon RX 6900 XT
 * Comparing Vulkan and ROCm compatibility on the host
-* Comparing `llama.cpp` and Ollama for local inference
 * Running quantized 7B and 8B instruct models within 16 GB of VRAM
 * Measuring model load time, token throughput, memory use, and VRAM use
 * Comparing CPU-only, GPU-accelerated, and hybrid inference
