@@ -105,9 +105,21 @@ gateway_url() {
 }
 
 wait_for_gateway_api() {
-  kubectl --context "${cluster_context}" \
+  # On a fresh cluster the Envoy Gateway controller can evaluate the
+  # GatewayClass before its EnvoyProxy parameters exist and leave a stale
+  # rejected status; a controller restart forces re-evaluation.
+  if ! kubectl --context "${cluster_context}" \
     wait gatewayclass/homelab \
-    --for=condition=Accepted --timeout=5m
+    --for=condition=Accepted --timeout=5m; then
+    echo "GatewayClass not accepted yet; restarting the Envoy Gateway controller..."
+    kubectl --context "${cluster_context}" --namespace envoy-gateway-system \
+      rollout restart deployment/envoy-gateway
+    kubectl --context "${cluster_context}" --namespace envoy-gateway-system \
+      rollout status deployment/envoy-gateway --timeout=3m
+    kubectl --context "${cluster_context}" \
+      wait gatewayclass/homelab \
+      --for=condition=Accepted --timeout=5m
+  fi
   kubectl --context "${cluster_context}" --namespace gateway-system \
     wait gateway/homelab \
     --for=condition=Programmed --timeout=5m
