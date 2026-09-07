@@ -7,3 +7,4 @@
     - base
     - container_runtime
     - kubernetes_tools
+    - validation_tools

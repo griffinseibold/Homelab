@@ -116,11 +116,12 @@ The normal `.localhost:8080` UI links require the current mapping.
 
 ## Validation
 
-Run `./scripts/validate.sh` before committing. It needs Python with
-`ansible-core` and `PyYAML`, plus kubectl, ShellCheck, kubeconform, and
-promtool, all installed on the host via Ansible provisioning. The workflow
-in `.github/workflows/validate.yml` records exact tool versions and
-download checksums.
+Run `./scripts/validate.sh` before committing. It needs Ansible, PyYAML,
+kubectl, ShellCheck, kubeconform, and promtool. Host provisioning installs
+all of them: `./scripts/bootstrap-host.sh` installs Ansible from apt, and
+the `validation_tools` role covers the rest. The workflow in
+`.github/workflows/validate.yml` records exact tool versions and download
+checksums for CI, which provisions its own runner.
 
 Validation checks scripts, strict YAML, reconciliation paths/dependencies,
 Kustomize builds, native Kubernetes schemas, Ansible syntax and regression

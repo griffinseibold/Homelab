@@ -3,3 +3,16 @@ __pycache__/
 .pytest_cache/
 .venv/
 
+# Local credentials and large/runtime artifacts
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.kubeconfig
+kubeconfig
+.kube/
+*.gguf
+*.gguf.partial
+/backups/
+/homelab-backups/
