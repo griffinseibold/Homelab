@@ -6,3 +6,14 @@ resources:
   - deployment.yaml
   - service.yaml
   - http-route.yaml
+  - service-monitor.yaml
+  - prometheus-rule.yaml
+configMapGenerator:
+  - name: llama-server-dashboard
+    files:
+      - llama-server.json=dashboard.json
+    options:
+      # The Grafana sidecar watches data updates; keep one dashboard ConfigMap.
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"

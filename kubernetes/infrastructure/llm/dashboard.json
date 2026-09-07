@@ -1,0 +1,88 @@
+{
+  "uid": "homelab-llm",
+  "title": "LLM inference",
+  "description": "llama.cpp b10731 metrics. Generation counters update when requests finish, so rates can be delayed during long generations. Zero throughput while idle is normal.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "tags": ["homelab", "llm"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "title": "Metrics endpoint",
+      "description": "At least one llama-server scrape target is healthy. Missing discovery or failed scrapes show Down; this does not test the public Gateway route.",
+      "type": "stat",
+      "gridPos": {"x": 0, "y": 0, "w": 8, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "max(up{namespace=\"llm\", service=\"llama-server\", endpoint=\"http\"}) or vector(0)", "instant": true}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [{"type": "value", "options": {"0": {"text": "Down", "color": "red"}, "1": {"text": "Up", "color": "green"}}}],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none"}
+    },
+    {
+      "id": 2,
+      "title": "Requests processing",
+      "type": "stat",
+      "gridPos": {"x": 8, "y": 0, "w": 8, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(llamacpp:requests_processing{namespace=\"llm\", service=\"llama-server\"})", "instant": true}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "min": 0, "color": {"mode": "fixed", "fixedColor": "blue"}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none"}
+    },
+    {
+      "id": 3,
+      "title": "Requests waiting",
+      "description": "A brief queue is normal. The backlog alert waits for 10 continuous minutes of queued requests.",
+      "type": "stat",
+      "gridPos": {"x": 16, "y": 0, "w": 8, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(llamacpp:requests_deferred{namespace=\"llm\", service=\"llama-server\"})", "instant": true}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "decimals": 0, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}]}},
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none"}
+    },
+    {
+      "id": 4,
+      "title": "Token throughput",
+      "description": "Prompt processing and completed generation tokens per second of wall time, averaged over the query interval. Idle time lowers these rates.",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 5, "w": 12, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(llamacpp:tokens_predicted_total{namespace=\"llm\", service=\"llama-server\"}[$__rate_interval]))", "legendFormat": "Generated", "range": true},
+        {"refId": "B", "expr": "sum(rate(llamacpp:prompt_tokens_total{namespace=\"llm\", service=\"llama-server\"}[$__rate_interval]))", "legendFormat": "Prompt", "range": true}
+      ],
+      "fieldConfig": {"defaults": {"unit": "suffix:tokens/s", "min": 0}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 5,
+      "title": "Requests over time",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 5, "w": 12, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(llamacpp:requests_processing{namespace=\"llm\", service=\"llama-server\"})", "legendFormat": "Processing", "range": true},
+        {"refId": "B", "expr": "sum(llamacpp:requests_deferred{namespace=\"llm\", service=\"llama-server\"})", "legendFormat": "Waiting", "range": true}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "min": 0, "custom": {"lineInterpolation": "stepAfter"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    }
+  ]
+}

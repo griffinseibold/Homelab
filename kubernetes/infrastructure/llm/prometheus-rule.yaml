@@ -1,0 +1,33 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: llama-server
+  labels:
+    app.kubernetes.io/name: llama-server
+    # Match the kube-prometheus-stack rule selector.
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: llama-server
+      rules:
+        - alert: LlamaServerUnavailable
+          # The fallback also catches missing pods, endpoints or discovery.
+          expr: (max(up{namespace="llm", service="llama-server", endpoint="http"}) or vector(0)) < 1
+          for: 10m
+          labels:
+            severity: warning
+            namespace: llm
+            service: llama-server
+          annotations:
+            summary: LLM metrics have been unavailable for 10 minutes
+            description: Check the llama-server pod, model and GPU mounts, startup logs, and ServiceMonitor. Normal model loading and brief restarts are allowed 10 minutes to recover.
+        - alert: LlamaServerQueueBacklog
+          expr: max(llamacpp:requests_deferred{namespace="llm", service="llama-server"}) > 0
+          for: 10m
+          labels:
+            severity: warning
+            namespace: llm
+            service: llama-server
+          annotations:
+            summary: LLM requests have been queued for 10 minutes
+            description: The server has had a continuous request backlog. Inspect the LLM inference dashboard and request volume before adjusting concurrency, token limits, or GPU capacity.

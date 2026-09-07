@@ -7,8 +7,89 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cluster_name="homelab-dev"
 cluster_context="kind-homelab-dev"
 cluster_config="${repository_root}/kubernetes/kind/dev.yaml"
+# Keep this outside main so the EXIT trap can read it after function unwinding.
+rendered_cluster_config=""
 gateway_node_port="30080"
 gateway_host_port="8080"
+models_dir="${MODELS_DIR:-${HOME}/models}"
+llm_node_label="homelab.local/llm-capable"
+
+validate_gpu_directory() {
+  local gpu_directory="${1:-/dev/dri}"
+  local render_device
+
+  for render_device in "${gpu_directory}"/renderD*; do
+    if [[ -c "${render_device}" ]]; then
+      return
+    fi
+  done
+
+  echo "No GPU render device found in ${gpu_directory}." >&2
+  echo "The Vulkan LLM requires a host GPU with a working /dev/dri/renderD* device." >&2
+  return 1
+}
+
+render_cluster_config() {
+  local output_path="$1"
+
+  # A JSON string is also a YAML quoted scalar. This preserves spaces,
+  # quotes, backslashes and other characters without evaluating the path.
+  python3 - "${cluster_config}" "${models_dir}" "${output_path}" <<'PY'
+import json
+import pathlib
+import sys
+
+source, models_dir, output = sys.argv[1:]
+config = pathlib.Path(source).read_text()
+marker = '"__MODELS_DIR__"'
+if config.count(marker) != 2:
+    raise SystemExit("Expected two model directory placeholders in Kind configuration")
+pathlib.Path(output).write_text(config.replace(marker, json.dumps(models_dir)))
+PY
+}
+
+validate_cluster_mounts() {
+  local node_names
+  local cluster_nodes
+
+  node_names="$(kind get nodes --name "${cluster_name}")"
+  if [[ -z "${node_names}" ]]; then
+    echo "Could not find nodes in Kind cluster ${cluster_name}." >&2
+    return 1
+  fi
+  mapfile -t cluster_nodes <<<"${node_names}"
+  docker inspect "${cluster_nodes[@]}" | python3 -c '
+import json
+import os
+import sys
+
+expected_models_dir = os.path.realpath(sys.argv[1])
+workers = []
+errors = []
+for node in json.load(sys.stdin):
+    if node.get("Config", {}).get("Labels", {}).get("io.x-k8s.kind.role") != "worker":
+        continue
+    name = node["Name"].lstrip("/")
+    workers.append(name)
+    mounts = {mount["Destination"]: mount for mount in node.get("Mounts", [])}
+    for destination, source in (("/models", expected_models_dir), ("/dev/dri", "/dev/dri")):
+        mount = mounts.get(destination, {})
+        actual_source = mount.get("Source", "")
+        displayed_source = actual_source or "<missing>"
+        if mount.get("Type") != "bind" or os.path.realpath(actual_source) != source:
+            errors.append(f"{name}: {destination} must bind {source}; found {displayed_source}")
+        elif destination == "/models" and mount.get("RW", True):
+            errors.append(f"{name}: /models must be mounted read-only")
+if not workers:
+    errors.append("The cluster has no worker nodes for the GPU model server.")
+if errors:
+    print("Existing cluster mounts are incompatible:", file=sys.stderr)
+    print("\n".join(errors), file=sys.stderr)
+    print("The cluster has been preserved. Use its original MODELS_DIR, or back up persistent data and explicitly rebuild the cluster to change mounts.", file=sys.stderr)
+    raise SystemExit(1)
+print("\n".join(workers))
+' "${models_dir}"
+}
 
 require_command() {
   local command_name="$1"
@@ -160,64 +241,95 @@ wait_for_gateway_endpoint() {
   done
 }
 
-for required_command in curl docker kind kubectl flux; do
-  require_command "${required_command}"
-done
+main() {
+  local existing_clusters
+  local llm_nodes
+  local node_name
 
-if ! docker info >/dev/null 2>&1; then
-  echo "Docker is not available to the current user." >&2
-  echo "Log out and back in after running ./scripts/bootstrap-host.sh." >&2
-  exit 1
-fi
+  for required_command in curl docker kind kubectl flux python3 sha256sum; do
+    require_command "${required_command}"
+  done
 
-if kind get clusters | grep -Fxq "${cluster_name}"; then
-  echo "Kind cluster ${cluster_name} already exists."
-  if ! gateway_host_port_is_mapped; then
-    echo "This cluster predates the localhost Gateway port mapping."
-    echo "Bootstrap will use its Kind node address without recreating the cluster."
+  # Check local prerequisites before creating or changing a cluster. The check
+  # verifies the pinned hashes without starting a multi-gigabyte download.
+  MODELS_DIR="${models_dir}" "${repository_root}/scripts/download-models.sh" --check
+  models_dir="$(cd "${models_dir}" && pwd -P)"
+  validate_gpu_directory
+
+  if ! docker info >/dev/null 2>&1; then
+    echo "Docker is not available to the current user." >&2
+    echo "Log out and back in after running ./scripts/bootstrap-host.sh." >&2
+    exit 1
   fi
-else
-  echo "Creating Kind cluster ${cluster_name}..."
-  kind create cluster --config "${cluster_config}"
+
+  existing_clusters="$(kind get clusters)"
+  if grep -Fxq "${cluster_name}" <<<"${existing_clusters}"; then
+    echo "Kind cluster ${cluster_name} already exists."
+    llm_nodes="$(validate_cluster_mounts)"
+    if ! gateway_host_port_is_mapped; then
+      echo "This cluster predates the localhost Gateway port mapping."
+      echo "Bootstrap will use its Kind node address without recreating the cluster."
+    fi
+  else
+    echo "Creating Kind cluster ${cluster_name}..."
+    rendered_cluster_config="$(mktemp --suffix=.yaml)"
+    trap 'rm -f -- "${rendered_cluster_config}"' EXIT
+    render_cluster_config "${rendered_cluster_config}"
+    kind create cluster --config "${rendered_cluster_config}"
+    rm -f -- "${rendered_cluster_config}"
+    trap - EXIT
+    llm_nodes="$(validate_cluster_mounts)"
+  fi
+
+  echo "Waiting for Kubernetes nodes..."
+  kubectl --context "${cluster_context}" \
+    wait --for=condition=Ready nodes --all --timeout=2m
+
+  # Existing clusters also receive the placement label after their immutable
+  # mounts have been checked, so an upgrade does not require cluster recreation.
+  while IFS= read -r node_name; do
+    kubectl --context "${cluster_context}" label node "${node_name}" \
+      "${llm_node_label}=true" --overwrite
+  done <<<"${llm_nodes}"
+
+  bootstrap_flux
+
+  echo "Reconciling the latest Git revision..."
+  flux reconcile kustomization flux-system \
+    --with-source \
+    --context "${cluster_context}" \
+    --timeout=10m
+
+  echo "Waiting for infrastructure..."
+  wait_for_flux_kustomizations
+  wait_for_gateway_api
+  wait_for_gateway_endpoint grafana.localhost /api/health
+  wait_for_gateway_endpoint argocd.localhost /healthz
+  wait_for_gateway_endpoint llm.localhost /health
+  wait_for_gateway_endpoint chat.localhost /health
+
+  echo
+  echo "Dev environment is ready."
+  flux get all --all-namespaces --context "${cluster_context}"
+  kubectl --context "${cluster_context}" \
+    get deployments,pods,services --all-namespaces
+  kubectl --context "${cluster_context}" \
+    get gatewayclasses.gateway.networking.k8s.io
+  kubectl --context "${cluster_context}" \
+    get gateways.gateway.networking.k8s.io,httproutes.gateway.networking.k8s.io \
+    --all-namespaces
+  echo
+  echo "Applications are registered through Argo CD and are not part of this"
+  echo "repository; re-register them in the Argo CD UI after a cluster rebuild."
+  echo "Access the chat UI at http://chat.localhost:8080"
+  echo "Access the LLM API at http://llm.localhost:8080/v1"
+  echo "Access Grafana at http://grafana.localhost:8080"
+  echo "Access Argo CD at http://argocd.localhost:8080 (user admin; password below)"
+  printf '%s\n' "kubectl --context ${cluster_context} -n argocd get secret argocd-initial-admin-secret -o go-template='{{ index .data \"password\" | base64decode }}{{ \"\\n\" }}'"
+  echo "Read the generated Grafana login with:"
+  printf '%s\n' "kubectl --context ${cluster_context} -n monitoring get secret kube-prometheus-stack-grafana -o go-template='user: {{ index .data \"admin-user\" | base64decode }}{{ \"\\n\" }}password: {{ index .data \"admin-password\" | base64decode }}{{ \"\\n\" }}'"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-
-echo "Waiting for Kubernetes nodes..."
-kubectl --context "${cluster_context}" \
-  wait --for=condition=Ready nodes --all --timeout=2m
-
-bootstrap_flux
-
-echo "Reconciling the latest Git revision..."
-flux reconcile kustomization flux-system \
-  --with-source \
-  --context "${cluster_context}" \
-  --timeout=10m
-
-echo "Waiting for infrastructure..."
-wait_for_flux_kustomizations
-wait_for_gateway_api
-wait_for_gateway_endpoint grafana.localhost /api/health
-wait_for_gateway_endpoint argocd.localhost /healthz
-wait_for_gateway_endpoint llm.localhost /health
-wait_for_gateway_endpoint chat.localhost /health
-
-echo
-echo "Dev environment is ready."
-flux get all --all-namespaces --context "${cluster_context}"
-kubectl --context "${cluster_context}" \
-  get deployments,pods,services --all-namespaces
-kubectl --context "${cluster_context}" \
-  get gatewayclasses.gateway.networking.k8s.io
-kubectl --context "${cluster_context}" \
-  get gateways.gateway.networking.k8s.io,httproutes.gateway.networking.k8s.io \
-  --all-namespaces
-echo
-echo "Applications are registered through Argo CD and are not part of this"
-echo "repository; re-register them in the Argo CD UI after a cluster rebuild."
-echo "Access the chat UI at http://chat.localhost:8080"
-echo "Access the LLM API at http://llm.localhost:8080/v1"
-echo "Access Grafana at http://grafana.localhost:8080"
-echo "Access Argo CD at http://argocd.localhost:8080 (user admin; password below)"
-echo "kubectl --context ${cluster_context} -n argocd get secret argocd-initial-admin-secret -o go-template='{{ index .data \"password\" | base64decode }}{{ \"\\n\" }}'"
-echo "Read the generated Grafana login with:"
-echo "kubectl --context ${cluster_context} -n monitoring get secret kube-prometheus-stack-grafana -o go-template='user: {{ index .data \"admin-user\" | base64decode }}{{ \"\\n\" }}password: {{ index .data \"admin-password\" | base64decode }}{{ \"\\n\" }}'"

@@ -17,6 +17,9 @@ spec:
       labels:
         app.kubernetes.io/name: llama-server
     spec:
+      # Bootstrap labels workers only after verifying the model and GPU mounts.
+      nodeSelector:
+        homelab.local/llm-capable: "true"
       containers:
         - name: llama-server
           image: ghcr.io/ggml-org/llama.cpp:server-vulkan-b10731
@@ -31,6 +34,7 @@ spec:
             - 0.0.0.0
             - --port
             - "8080"
+            - --metrics
           ports:
             - name: http
               containerPort: 8080

@@ -25,7 +25,7 @@ spec:
       domain: argocd.localhost
     configs:
       params:
-        # TLS terminates at the shared Gateway; serve plain HTTP behind it.
+        # The loopback-only development Gateway serves plain HTTP.
         server.insecure: true
       cm:
         url: http://argocd.localhost:8080

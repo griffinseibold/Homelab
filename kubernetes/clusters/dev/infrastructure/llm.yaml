@@ -6,6 +6,8 @@ metadata:
 spec:
   dependsOn:
     - name: gateway-api-config
+    # ServiceMonitor and PrometheusRule CRDs come from kube-prometheus-stack.
+    - name: monitoring
   interval: 10m
   retryInterval: 2m
   timeout: 15m
