@@ -113,6 +113,3 @@ adds three capabilities:
 The next operational gaps are off-host encrypted backups, an external alert
 receiver, and managed secrets. Public access would also require authentication
 and TLS. Keep plaintext credentials, model weights, and backups out of Git.
-
-For commercial directions, see [business ideas worth testing](docs/business-ideas.md),
-including proposed offers, current competitor prices, and paid validation steps.
