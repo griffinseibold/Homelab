@@ -114,21 +114,13 @@ Use `http://NODE_IP:30080` with the intended hostname in the HTTP `Host` header.
 For example, `curl --noproxy '*' -H 'Host: llm.localhost' http://NODE_IP:30080/health`.
 The normal `.localhost:8080` UI links require the current mapping.
 
-## Validation
+## Tests
 
-Run `./scripts/validate.sh` before committing. It needs Ansible, PyYAML,
-kubectl, ShellCheck, kubeconform, and promtool. Host provisioning installs
-all of them: `./scripts/bootstrap-host.sh` installs Ansible from apt, and
-the `validation_tools` role covers the rest. The workflow in
-`.github/workflows/validate.yml` records exact tool versions and download
-checksums for CI, which provisions its own runner.
+Bootstrap and recovery regressions run with:
 
-Validation checks scripts, strict YAML, reconciliation paths/dependencies,
-Kustomize builds, native Kubernetes schemas, Ansible syntax and regression
-behavior. Promtool checks alert firing/recovery and dashboard query syntax.
-Unbundled custom-resource schemas are explicitly reported as skipped;
-Helm charts and GPU runtime behavior still need integration checks.
-No cluster credentials are required by CI, and it does not deploy changes.
+```bash
+python3 -m unittest discover -s tests
+```
 
 For a real archive/restore round trip using synthetic SQLite data and a single
 disposable Docker container (no Kind access):

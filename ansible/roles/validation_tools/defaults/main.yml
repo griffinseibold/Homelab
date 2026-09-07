@@ -1,5 +1,0 @@
----
-kubeconform_version: "v0.7.0"
-kubeconform_sha256: "c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3"
-prometheus_version: "3.14.0"
-prometheus_sha256: "f665c6da19eb7ba399c915d30c7d9793c9b417bf8a749b504bc470678631478d"

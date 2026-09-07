@@ -70,11 +70,9 @@ authentication configuration.
 ./scripts/download-models.sh --check       # Verify weights without downloading
 flux get kustomizations --context kind-homelab-dev
 kubectl --context kind-homelab-dev get pods,pvc -A
-./scripts/validate.sh                      # Same checks as CI; dependencies below
 ./scripts/backup-dev.py create             # Pauses dev nodes while copying PVCs
 ```
 
-The [validation guide](docs/operations.md#validation) covers required tools.
 Backups go to `~/homelab-backups` by default. Read the
 [recovery guide](docs/recovery.md) before a cluster rebuild: ordinary PVC data
 lives inside Kind nodes and is lost when the cluster is deleted. Host model
@@ -85,12 +83,12 @@ weights and host-side backups survive cluster deletion.
 | Path | Purpose |
 | --- | --- |
 | `ansible/` | Ubuntu host configuration and tool installation |
-| `scripts/` | Bootstrap, model download, validation, backup and recovery |
+| `scripts/` | Bootstrap, model download, backup and recovery |
 | `kubernetes/clusters/dev/` | Flux reconciliation and dependency ordering |
 | `kubernetes/infrastructure/` | Gateway, monitoring, logging, Argo CD, LLM and chat |
 | `kubernetes/kind/` | Dev template and an unused `homelab-lab` configuration |
-| `tests/` | Bootstrap/recovery regressions and alert behavior checks |
-| `docs/` | Operations, recovery, and researched business ideas |
+| `tests/` | Bootstrap and recovery regressions |
+| `docs/` | Operations and recovery guides |
 
 Applications stay in their own repositories; register them through Argo CD.
 The reference application is
@@ -101,13 +99,11 @@ private repository credentials must be restored separately.
 ## Current priorities
 
 This revision closes bootstrap portability and incomplete-download gaps, then
-adds three capabilities:
+adds two capabilities:
 
-1. **Automated validation:** shell checks, Ansible syntax, Kustomize builds,
-   manifest checks, and behavioral tests run locally and in GitHub Actions.
-2. **Recovery:** verified host-side PVC archives, Argo registration export,
+1. **Recovery:** verified host-side PVC archives, Argo registration export,
    and restoration into an empty, unused volume.
-3. **LLM observability:** metrics, an inference dashboard, and alerts for an
+2. **LLM observability:** metrics, an inference dashboard, and alerts for an
    unavailable server or sustained queue backlog.
 
 The next operational gaps are off-host encrypted backups, an external alert
