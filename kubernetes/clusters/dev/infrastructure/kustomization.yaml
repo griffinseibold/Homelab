@@ -3,6 +3,8 @@ kind: Kustomization
 resources:
   - gateway-api-controller.yaml
   - gateway-api-config.yaml
+  - cert-manager.yaml
+  - lab-ca.yaml
   - monitoring.yaml
   - logging.yaml
   - argocd.yaml

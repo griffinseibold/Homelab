@@ -29,6 +29,7 @@ class BootstrapTests(unittest.TestCase):
         (self.repo / "kubernetes/kind").mkdir(parents=True)
         shutil.copy2(ROOT / "scripts/bootstrap-dev.sh", self.repo / "scripts")
         shutil.copy2(ROOT / "scripts/download-models.sh", self.repo / "scripts")
+        shutil.copy2(ROOT / "scripts/lan-gateway.conf", self.repo / "scripts")
         shutil.copy2(ROOT / "kubernetes/kind/dev.yaml", self.repo / "kubernetes/kind")
         shutil.copytree(
             ROOT / "kubernetes/clusters/dev/infrastructure",
@@ -113,7 +114,10 @@ elif tool == "curl" and "--output" in args:
             MOCK_LOG=str(self.log),
             RENDERED_CONFIG=str(self.rendered),
             INSPECT_JSON=json.dumps(self.nodes),
+            LAB_CA_DIR=str(self.directory / "lab-ca"),
         )
+        self.env.pop("LAN_ADDRESS", None)
+        self.lab_ca = self.directory / "lab-ca"
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
@@ -297,6 +301,94 @@ elif tool == "curl" and "--output" in args:
         result = self.run_bootstrap("validate_cluster_mounts")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no worker nodes", result.stderr)
+
+    def test_lab_ca_is_created_once_and_constrained_to_lab_names(self):
+        self.assert_success(self.run_bootstrap("ensure_lab_ca"))
+        certificate = (self.lab_ca / "ca.crt").read_bytes()
+        self.assertEqual(self.lab_ca.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.lab_ca / "ca.key").stat().st_mode & 0o777, 0o600)
+        constraints = subprocess.run(
+            ["openssl", "x509", "-in", str(self.lab_ca / "ca.crt"), "-noout", "-ext", "nameConstraints"],
+            text=True, capture_output=True, check=True,
+        ).stdout
+        self.assertIn("critical", constraints)
+        self.assertIn("DNS:lab.internal", constraints.split("Excluded:")[0])
+        self.assertIn("IP:0.0.0.0/0.0.0.0", constraints.split("Excluded:")[1])
+        self.assert_success(self.run_bootstrap("ensure_lab_ca"))
+        self.assertEqual((self.lab_ca / "ca.crt").read_bytes(), certificate)
+        self.assertEqual(self.calls(), [])
+
+    def test_partial_or_mismatched_lab_ca_is_never_replaced(self):
+        self.assert_success(self.run_bootstrap("ensure_lab_ca"))
+        certificate = (self.lab_ca / "ca.crt").read_bytes()
+        key = (self.lab_ca / "ca.key").read_bytes()
+        (self.lab_ca / "ca.key").unlink()
+        result = self.run_bootstrap("ensure_lab_ca")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("will not replace", result.stderr)
+        self.assertEqual((self.lab_ca / "ca.crt").read_bytes(), certificate)
+        self.assertFalse((self.lab_ca / "ca.key").exists())
+
+        other = self.directory / "other-ca"
+        self.env["LAB_CA_DIR"] = str(other)
+        self.assert_success(self.run_bootstrap("ensure_lab_ca"))
+        (self.lab_ca / "ca.key").write_bytes((other / "ca.key").read_bytes())
+        self.env["LAB_CA_DIR"] = str(self.lab_ca)
+        result = self.run_bootstrap("ensure_lab_ca")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not belong", result.stderr)
+        self.assertEqual((self.lab_ca / "ca.crt").read_bytes(), certificate)
+        self.assertNotEqual((self.lab_ca / "ca.key").read_bytes(), key)
+
+    def test_lan_address_must_be_a_private_ipv4_address_on_this_host(self):
+        assigned = "lan_address_is_assigned() { return 0; }; validate_lan_address"
+        for address in ("8.8.8.8", "100.64.0.1", "127.0.0.1", "fe80::1", "192.168.1"):
+            with self.subTest(address=address):
+                self.env["LAN_ADDRESS"] = address
+                self.assertNotEqual(self.run_bootstrap(assigned).returncode, 0)
+        self.env["LAN_ADDRESS"] = "192.168.1.50"
+        self.assert_success(self.run_bootstrap(assigned))
+        result = self.run_bootstrap("lan_address_is_assigned() { return 1; }; validate_lan_address")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not assigned to this host", result.stderr)
+
+    def test_invalid_lan_address_stops_bootstrap_before_cluster_access(self):
+        self.target.write_bytes(PAYLOAD)
+        self.env["LAN_ADDRESS"] = "203.0.113.10"
+        self.assertNotEqual(self.run_bootstrap().returncode, 0)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse(self.lab_ca.exists())
+
+    def test_lan_address_publishes_lan_gateway_only_on_that_address(self):
+        self.target.write_bytes(PAYLOAD)
+        self.env["LAN_ADDRESS"] = "192.168.1.50"
+        self.assert_success(self.run_bootstrap(
+            "validate_gpu_directory() { return 0; }; lan_address_is_assigned() { return 0; }; main"
+        ))
+        calls = self.calls()
+        self.assertIn(["docker", "rm", "--force", "homelab-dev-lan-gateway"], calls)
+        run = next(call for call in calls if call[:2] == ["docker", "run"])
+        self.assertEqual(run[run.index("--publish") + 1], "192.168.1.50:443:443")
+        self.assertEqual(run[run.index("--network") + 1], "kind")
+        self.assertEqual(run[run.index("--restart") + 1], "unless-stopped")
+        config = next(arg for arg in run if arg.startswith("NGINX_CONFIG="))
+        self.assertIn("set $gateway homelab-dev-control-plane:30443;", config)
+        self.assertIn("deny all;", config)
+        self.assertNotIn("__GATEWAY_NODE__", config)
+        self.assertLess(calls.index(["docker", "rm", "--force", "homelab-dev-lan-gateway"]), calls.index(run))
+        self.assertTrue(any(
+            call[0] == "curl" and "chat.lab.internal:443:192.168.1.50" in call for call in calls
+        ))
+
+    def test_bootstrap_loads_lab_ca_and_turns_lan_access_off_by_default(self):
+        self.target.write_bytes(PAYLOAD)
+        self.assert_success(self.run_bootstrap())
+        calls = self.calls()
+        secret = next(call for call in calls if "secret" in call and "lab-ca" in call)
+        self.assertIn(f"--cert={self.lab_ca / 'ca.crt'}", secret)
+        self.assertIn(f"--key={self.lab_ca / 'ca.key'}", secret)
+        self.assertIn(["docker", "rm", "--force", "homelab-dev-lan-gateway"], calls)
+        self.assertFalse(any(call[:2] == ["docker", "run"] for call in calls))
 
 
 if __name__ == "__main__":

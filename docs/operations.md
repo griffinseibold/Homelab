@@ -30,6 +30,95 @@ It schedules on workers labeled `homelab.local/llm-capable=true`, where the
 bootstrap has checked read-only model mounts and `/dev/dri` device mounts.
 Both workers share the same physical GPU; they do not provide two GPUs.
 
+## Home network access
+
+Phones and laptops on your Wi-Fi can use chat and Grafana over HTTPS at
+`https://chat.lab.internal` and `https://grafana.lab.internal`. The LLM API and
+Argo CD are never offered on the home network. Access is off until you enable
+it, and it is never published to the internet:
+
+- The Gateway's `lan` listener is published on one private IPv4 address,
+  `LAN_ADDRESS`, not on `0.0.0.0` or the host's public IPv6 address.
+- The forwarding container drops connections that do not come from a private
+  network (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`).
+- Only namespaces labeled `gateway.homelab/lan: "true"` can attach routes to
+  the listener; other routes return 404 there, even with a forged `Host` header.
+- Certificates come from your own root certificate authority. Its name
+  constraints restrict it to `lab.internal` names and forbid IP addresses, so
+  a leaked key cannot impersonate any other site.
+- Your router's firewall remains the outer boundary. Do not add port forwards
+  for this host.
+
+### One-time setup
+
+1. **Reserve the host's address.** In your router's DHCP settings, give this
+   host a fixed address. Find its current address with `ip -4 address`.
+2. **Add router DNS entries** for `chat.lab.internal` and
+   `grafana.lab.internal` pointing to that address. Devices must use the
+   router for DNS; a VPN or a custom Private DNS setting on a phone bypasses it.
+3. **Run bootstrap with the address.** It reuses the existing cluster, loads
+   the root certificate authority and starts the `homelab-dev-lan-gateway`
+   container:
+
+   ```bash
+   LAN_ADDRESS=192.168.1.50 ./scripts/bootstrap-dev.sh   # this host's address
+   ```
+
+   Set `LAN_ADDRESS` on every run. Running bootstrap without it turns home
+   network access off.
+4. **Trust the root certificate on each device.** The first bootstrap creates
+   it in `~/.config/homelab/lab-ca/` (or `LAB_CA_DIR`). Copy only `ca.crt` to
+   the device, by email or a cloud drive for example. **Never copy `ca.key`.**
+   - iPhone: open `ca.crt` and allow the profile download. Then go to Settings
+     > General > VPN & Device Management and install it. Finally, go to Settings >
+     General > About > Certificate Trust Settings and turn on full trust for
+     "Homelab lab.internal CA".
+   - Android: Settings > Security > Encryption & credentials > Install a
+     certificate > CA certificate, then choose `ca.crt`. Menu names vary by
+     manufacturer. Browsers trust it; many other apps ignore user certificates.
+5. **Open the site with its scheme** the first time, for example
+   `https://chat.lab.internal`. Browsers treat an unfamiliar ending such as
+   `.internal` as a search unless `https://` is typed. Bookmark it afterwards.
+
+Open WebUI lets the first account register and become administrator; later
+sign-ups are disabled. An existing installation keeps the setting stored in
+its database, so check Admin Panel > Settings > General and turn off
+**Enable New Sign Ups** if it is still on.
+
+### Adding an application
+
+In the application's chart, label its namespace `gateway.homelab/lan: "true"`
+and give its `HTTPRoute` a hostname such as `hello-crud.lab.internal` plus a
+second parent reference to listener `lan`:
+
+```yaml
+parentRefs:
+  - name: homelab
+    namespace: gateway-system
+    sectionName: http
+  - name: homelab
+    namespace: gateway-system
+    sectionName: lan
+```
+
+Then add the hostname to your router's DNS. The wildcard certificate already
+covers any `*.lab.internal` name. Only expose applications that have their
+own login.
+
+### Turning it off
+
+`docker stop homelab-dev-lan-gateway` removes home network access immediately,
+and it stays off after reboots. The next bootstrap run with `LAN_ADDRESS`
+starts it again. To disable it through bootstrap, run it without `LAN_ADDRESS`.
+
+| Symptom | Next check |
+| --- | --- |
+| Name does not resolve on the phone | The router DNS entry; Wi-Fi rather than mobile data; no VPN or custom Private DNS |
+| Connection refused or times out | `docker ps --filter name=homelab-dev-lan-gateway`; the host still has `LAN_ADDRESS` |
+| Certificate warning | The device trusts `ca.crt` (iPhone also needs full trust enabled) |
+| 404 on the home network only | The namespace label and `lan` parent reference; `kubectl --context kind-homelab-dev get httproutes -A` |
+| `lab-ca` Flux Kustomization not ready | Rerun bootstrap so it loads the root into `cert-manager/lab-ca` |
+
 ## Applications
 
 Register an Argo CD Application pointing to the application's repository and
@@ -40,6 +129,8 @@ For Gateway access, the chart must supply an `HTTPRoute` attached to
 `gateway-system/homelab`, listener `http`, and label its namespace
 `gateway.homelab/access: public`. Use a hostname such as
 `hello-crud.localhost`. A route without hostnames is the catch-all.
+To also reach it from phones on your Wi-Fi, see
+[adding an application](#adding-an-application) to the home network.
 
 Applications, ApplicationSets and AppProjects are exported by the backup
 script. They can be registered manually again or imported after data recovery.

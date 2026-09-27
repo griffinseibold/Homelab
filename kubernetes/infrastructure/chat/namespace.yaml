@@ -4,3 +4,4 @@ metadata:
   name: chat
   labels:
     gateway.homelab/access: public
+    gateway.homelab/lan: "true"

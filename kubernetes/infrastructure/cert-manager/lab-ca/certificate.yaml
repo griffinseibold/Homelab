@@ -1,0 +1,21 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: lab-internal
+  namespace: gateway-system
+spec:
+  secretName: lab-internal-tls
+  # One wildcard serves every opted-in application on the Gateway's lan
+  # listener. The root's name constraints only permit lab.internal names.
+  dnsNames:
+    - "*.lab.internal"
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  # iOS rejects TLS server certificates without the serverAuth usage.
+  usages:
+    - server auth
+    - digital signature
+  issuerRef:
+    kind: ClusterIssuer
+    name: lab-ca

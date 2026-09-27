@@ -1,0 +1,21 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: lab-ca
+  namespace: flux-system
+spec:
+  # Nothing depends on this, so a missing root only affects the lan
+  # listener instead of blocking the rest of the platform.
+  dependsOn:
+    - name: cert-manager
+    # The Certificate lives beside the Gateway in gateway-system.
+    - name: gateway-api-config
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  path: ./kubernetes/infrastructure/cert-manager/lab-ca
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
