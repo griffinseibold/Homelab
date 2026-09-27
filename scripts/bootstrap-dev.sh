@@ -11,15 +11,14 @@ cluster_config="${repository_root}/kubernetes/kind/dev.yaml"
 rendered_cluster_config=""
 gateway_node_port="30080"
 gateway_host_port="8080"
+lan_node_port="30443"
+lan_host_port="443"
 models_dir="${MODELS_DIR:-${HOME}/models}"
 llm_node_label="homelab.local/llm-capable"
-# Home-network access is opt-in: without LAN_ADDRESS the Gateway stays on
-# loopback. The root certificate authority lives on the host, outside Git and
-# outside the cluster, so devices that trust it survive cluster rebuilds.
+# Home-network access is opt-in: a cluster created without LAN_ADDRESS keeps
+# the lan listener on loopback. The root certificate authority lives on the
+# host, outside Git and the cluster, so devices that trust it survive rebuilds.
 lan_address="${LAN_ADDRESS:-}"
-lan_gateway_container="${cluster_name}-lan-gateway"
-lan_gateway_config="${repository_root}/scripts/lan-gateway.conf"
-lan_gateway_image="nginx:1.30.5-alpine"
 lab_domain="lab.internal"
 lab_ca_dir="${LAB_CA_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/homelab/lab-ca}"
 
@@ -43,17 +42,21 @@ render_cluster_config() {
 
   # A JSON string is also a YAML quoted scalar. This preserves spaces,
   # quotes, backslashes and other characters without evaluating the path.
-  python3 - "${cluster_config}" "${models_dir}" "${output_path}" <<'PY'
+  python3 - "${cluster_config}" "${models_dir}" "${lan_address:-127.0.0.1}" "${output_path}" <<'PY'
 import json
 import pathlib
 import sys
 
-source, models_dir, output = sys.argv[1:]
+source, models_dir, lan_address, output = sys.argv[1:]
 config = pathlib.Path(source).read_text()
-marker = '"__MODELS_DIR__"'
-if config.count(marker) != 2:
-    raise SystemExit("Expected two model directory placeholders in Kind configuration")
-pathlib.Path(output).write_text(config.replace(marker, json.dumps(models_dir)))
+for marker, count, value, description in (
+    ('"__MODELS_DIR__"', 2, models_dir, "two model directory placeholders"),
+    ('"__LAN_ADDRESS__"', 1, lan_address, "one LAN address placeholder"),
+):
+    if config.count(marker) != count:
+        raise SystemExit(f"Expected {description} in Kind configuration")
+    config = config.replace(marker, json.dumps(value))
+pathlib.Path(output).write_text(config)
 PY
 }
 
@@ -139,28 +142,31 @@ load_lab_ca() {
       --server-side --field-manager=homelab-bootstrap -f -
 }
 
-configure_lan_gateway() {
-  local config
+published_lan_address() {
+  { docker port "${cluster_name}-control-plane" "${lan_node_port}/tcp" 2>/dev/null || true; } \
+    | awk -F: -v expected_port="${lan_host_port}" '
+        $NF == expected_port { print $1; exit }
+      '
+}
 
-  # Recreate on every run so configuration changes apply, and so running
-  # without LAN_ADDRESS turns home-network access off again.
-  docker rm --force "${lan_gateway_container}" >/dev/null 2>&1 || true
+check_existing_lan_mapping() {
+  local published
+
+  published="$(published_lan_address)"
   if [[ -z "${lan_address}" ]]; then
+    # The address is fixed when the cluster is created, so later runs keep
+    # using it without LAN_ADDRESS.
+    if [[ -n "${published}" && "${published}" != "127.0.0.1" ]]; then
+      lan_address="${published}"
+    fi
     return
   fi
-
-  config="$(sed "s/__GATEWAY_NODE__/${cluster_name}-control-plane/" "${lan_gateway_config}")"
-  echo "Publishing the Gateway's lan listener on ${lan_address}:443..."
-  # Binding the single private IPv4 address keeps the port off every other
-  # interface, including the host's public IPv6 address. The container joins
-  # Kind's network to reach the control-plane NodePort by name.
-  docker run --detach --name "${lan_gateway_container}" \
-    --network kind --restart unless-stopped \
-    --publish "${lan_address}:443:443" \
-    --env "NGINX_CONFIG=${config}" \
-    "${lan_gateway_image}" \
-    sh -c 'printf "%s\n" "${NGINX_CONFIG}" >/etc/nginx/nginx.conf && exec nginx -g "daemon off;"' \
-    >/dev/null
+  if [[ "${published}" != "${lan_address}" ]]; then
+    echo "This cluster publishes home-network HTTPS on ${published:-no address}, not ${lan_address}." >&2
+    echo "Kind fixes port mappings when a cluster is created, and the cluster has been preserved." >&2
+    echo "To change it, back up persistent data (docs/recovery.md), delete the cluster and rerun bootstrap with LAN_ADDRESS." >&2
+    return 1
+  fi
 }
 
 validate_cluster_mounts() {
@@ -407,6 +413,7 @@ main() {
   if grep -Fxq "${cluster_name}" <<<"${existing_clusters}"; then
     echo "Kind cluster ${cluster_name} already exists."
     llm_nodes="$(validate_cluster_mounts)"
+    check_existing_lan_mapping
     if ! gateway_host_port_is_mapped; then
       echo "This cluster predates the localhost Gateway port mapping."
       echo "Bootstrap will use its Kind node address without recreating the cluster."
@@ -449,7 +456,6 @@ main() {
   wait_for_gateway_endpoint argocd.localhost /healthz
   wait_for_gateway_endpoint llm.localhost /health
   wait_for_gateway_endpoint chat.localhost /health
-  configure_lan_gateway
   if [[ -n "${lan_address}" ]]; then
     wait_for_lan_endpoint "chat.${lab_domain}" /health
     wait_for_lan_endpoint "grafana.${lab_domain}" /api/health
@@ -481,8 +487,8 @@ main() {
     echo "Devices need router DNS entries for these names pointing at ${lan_address},"
     echo "and must trust the root certificate ${lab_ca_dir}/ca.crt (docs/operations.md)."
   else
-    echo "Home-network access is off. To enable it, rerun with LAN_ADDRESS set to"
-    echo "this host's private IPv4 address (docs/operations.md)."
+    echo "Home-network access is off. Enabling it requires a cluster created with"
+    echo "LAN_ADDRESS set to this host's private IPv4 address (docs/operations.md)."
   fi
 }
 

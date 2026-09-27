@@ -29,7 +29,6 @@ class BootstrapTests(unittest.TestCase):
         (self.repo / "kubernetes/kind").mkdir(parents=True)
         shutil.copy2(ROOT / "scripts/bootstrap-dev.sh", self.repo / "scripts")
         shutil.copy2(ROOT / "scripts/download-models.sh", self.repo / "scripts")
-        shutil.copy2(ROOT / "scripts/lan-gateway.conf", self.repo / "scripts")
         shutil.copy2(ROOT / "kubernetes/kind/dev.yaml", self.repo / "kubernetes/kind")
         shutil.copytree(
             ROOT / "kubernetes/clusters/dev/infrastructure",
@@ -75,7 +74,12 @@ elif tool == "docker":
     if args[0] == "inspect":
         print(os.environ["INSPECT_JSON"])
     elif args[0] == "port":
-        print("127.0.0.1:8080")
+        if args[2:] == ["30443/tcp"]:
+            if not os.environ.get("LAN_PORT_MAPPING"):
+                raise SystemExit(1)
+            print(os.environ["LAN_PORT_MAPPING"])
+        else:
+            print("127.0.0.1:8080")
 elif tool == "curl" and "--output" in args:
     target = Path(args[args.index("--output") + 1])
     mode = os.environ.get("DOWNLOAD_MODE", "valid")
@@ -241,6 +245,7 @@ elif tool == "curl" and "--output" in args:
             if "hostPath:" in line and '"' in line
         ]
         self.assertEqual(model_paths, [unusual, unusual])
+        self.assertIn('listenAddress: "127.0.0.1"', self.lan_mapping())
 
     def test_new_cluster_uses_selected_models_directory_and_labels_worker(self):
         self.target.write_bytes(PAYLOAD)
@@ -359,37 +364,67 @@ elif tool == "curl" and "--output" in args:
         self.assertEqual(self.calls(), [])
         self.assertFalse(self.lab_ca.exists())
 
-    def test_lan_address_publishes_lan_gateway_only_on_that_address(self):
+    def lan_mapping(self):
+        lines = self.rendered.read_text().splitlines()
+        start = next(i for i, line in enumerate(lines) if "containerPort: 30443" in line)
+        return "\n".join(lines[start:start + 4])
+
+    def test_new_cluster_publishes_https_only_on_lan_address(self):
         self.target.write_bytes(PAYLOAD)
         self.env["LAN_ADDRESS"] = "192.168.1.50"
         self.assert_success(self.run_bootstrap(
             "validate_gpu_directory() { return 0; }; lan_address_is_assigned() { return 0; }; main"
         ))
-        calls = self.calls()
-        self.assertIn(["docker", "rm", "--force", "homelab-dev-lan-gateway"], calls)
-        run = next(call for call in calls if call[:2] == ["docker", "run"])
-        self.assertEqual(run[run.index("--publish") + 1], "192.168.1.50:443:443")
-        self.assertEqual(run[run.index("--network") + 1], "kind")
-        self.assertEqual(run[run.index("--restart") + 1], "unless-stopped")
-        config = next(arg for arg in run if arg.startswith("NGINX_CONFIG="))
-        self.assertIn("set $gateway homelab-dev-control-plane:30443;", config)
-        self.assertIn("deny all;", config)
-        self.assertNotIn("__GATEWAY_NODE__", config)
-        self.assertLess(calls.index(["docker", "rm", "--force", "homelab-dev-lan-gateway"]), calls.index(run))
+        self.assertIn("hostPort: 443", self.lan_mapping())
+        self.assertIn('listenAddress: "192.168.1.50"', self.lan_mapping())
+        self.assertNotIn("__LAN_ADDRESS__", self.rendered.read_text())
         self.assertTrue(any(
-            call[0] == "curl" and "chat.lab.internal:443:192.168.1.50" in call for call in calls
+            call[0] == "curl" and "chat.lab.internal:443:192.168.1.50" in call for call in self.calls()
         ))
 
-    def test_bootstrap_loads_lab_ca_and_turns_lan_access_off_by_default(self):
+    def test_new_cluster_without_lan_address_keeps_https_on_loopback(self):
         self.target.write_bytes(PAYLOAD)
         self.assert_success(self.run_bootstrap())
-        calls = self.calls()
-        secret = next(call for call in calls if "secret" in call and "lab-ca" in call)
+        self.assertIn('listenAddress: "127.0.0.1"', self.lan_mapping())
+        self.assertFalse(any(call[0] == "curl" and "--resolve" in call for call in self.calls()))
+        secret = next(call for call in self.calls() if "secret" in call and "lab-ca" in call)
         self.assertIn(f"--cert={self.lab_ca / 'ca.crt'}", secret)
         self.assertIn(f"--key={self.lab_ca / 'ca.key'}", secret)
-        self.assertIn(["docker", "rm", "--force", "homelab-dev-lan-gateway"], calls)
-        self.assertFalse(any(call[:2] == ["docker", "run"] for call in calls))
 
+    def test_existing_cluster_keeps_its_lan_address_without_lan_address_set(self):
+        self.target.write_bytes(PAYLOAD)
+        self.env["EXISTING_CLUSTER"] = "true"
+        self.env["LAN_PORT_MAPPING"] = "192.168.1.50:443"
+        self.assert_success(self.run_bootstrap())
+        self.assertTrue(any(
+            call[0] == "curl" and "grafana.lab.internal:443:192.168.1.50" in call for call in self.calls()
+        ))
+
+    def test_existing_cluster_with_other_lan_address_fails_without_mutations(self):
+        self.target.write_bytes(PAYLOAD)
+        self.env["EXISTING_CLUSTER"] = "true"
+        self.env["LAN_ADDRESS"] = "192.168.1.50"
+        for mapping in ("", "127.0.0.1:443", "192.168.1.60:443"):
+            with self.subTest(mapping=mapping):
+                self.log.unlink(missing_ok=True)
+                self.env["LAN_PORT_MAPPING"] = mapping
+                result = self.run_bootstrap(
+                    "validate_gpu_directory() { return 0; }; lan_address_is_assigned() { return 0; }; main"
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("cluster has been preserved", result.stderr)
+                self.assertFalse(any(call[0] in ("kubectl", "flux") for call in self.calls()))
+                self.assertFalse(any(call[:2] in (["kind", "create"], ["kind", "delete"]) for call in self.calls()))
+
+    def test_existing_cluster_with_matching_lan_address_is_reused(self):
+        self.target.write_bytes(PAYLOAD)
+        self.env["EXISTING_CLUSTER"] = "true"
+        self.env["LAN_ADDRESS"] = "192.168.1.50"
+        self.env["LAN_PORT_MAPPING"] = "192.168.1.50:443"
+        self.assert_success(self.run_bootstrap(
+            "validate_gpu_directory() { return 0; }; lan_address_is_assigned() { return 0; }; main"
+        ))
+        self.assertFalse(any(call[:3] == ["kind", "create", "cluster"] for call in self.calls()))
 
 if __name__ == "__main__":
     unittest.main()

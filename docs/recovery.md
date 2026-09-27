@@ -50,7 +50,8 @@ It lives on the host in `~/.config/homelab/lab-ca/` (or `LAB_CA_DIR`), outside
 Kind, and bootstrap reloads it into every rebuilt cluster, so trusting devices
 keep working. Keep a copy of `ca.key` and `ca.crt` somewhere private, such as a
 password manager. If they are lost, bootstrap creates a new root and every
-device must trust the new `ca.crt`.
+device must trust the new `ca.crt`. Create the replacement cluster with the
+same `LAN_ADDRESS` to keep home-network access.
 
 If a forced kill or host failure prevents cleanup, inspect Docker's paused
 containers and explicitly unpause the affected dev nodes before continuing.

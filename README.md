@@ -63,8 +63,8 @@ It checks the mounts and labels compatible workers so the server can schedule.
 
 See [operations](docs/operations.md) for credential commands, API examples,
 Prometheus access, logs, and troubleshooting. The `.localhost` addresses work
-on the host itself. Home-network addresses are off until you run bootstrap with
-`LAN_ADDRESS` and set up your router and devices; see
+on the host itself. Home-network addresses need a cluster created with
+`LAN_ADDRESS`, plus router and device setup; see
 [home network access](docs/operations.md#home-network-access). The LLM API and
 Argo CD stay on this host because they are unauthenticated or control the
 cluster.
