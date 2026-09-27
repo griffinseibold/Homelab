@@ -6,7 +6,8 @@ the platform; Argo CD deploys applications from their own repositories.
 
 ```text
 Ubuntu → Docker → Kind: homelab-dev (one control plane, two workers)
-                    ├─ Flux + Envoy Gateway → localhost:8080
+                    ├─ Flux + Envoy Gateway → localhost:8080, optional home-network HTTPS
+                    ├─ cert-manager → *.lab.internal from a host-kept root CA
                     ├─ Prometheus, Grafana, Loki and Alloy
                     ├─ llama.cpp / Vulkan → Qwen3-8B → Open WebUI
                     └─ Argo CD → independently registered applications
@@ -15,7 +16,8 @@ Ubuntu → Docker → Kind: homelab-dev (one control plane, two workers)
 The current host has a Ryzen 9 3900X, 48 GB RAM, and a Radeon RX 6900 XT
 with 16 GB VRAM. This is a single-host development environment. The GPU server
 uses privileged device access; the unauthenticated inference API and HTTP UIs
-are exposed through a Gateway bound to host loopback.
+are exposed through a Gateway bound to host loopback. Chat and Grafana can also
+be opted in to HTTPS on the home network; nothing is published to the internet.
 
 ## Start here
 
@@ -52,17 +54,20 @@ It checks the mounts and labels compatible workers so the server can schedule.
 
 ## Access
 
-| Service | URL | Login |
-| --- | --- | --- |
-| Chat | <http://chat.localhost:8080> | First registered account becomes admin |
-| LLM API | <http://llm.localhost:8080/v1> | None |
-| Grafana | <http://grafana.localhost:8080> | Generated credentials |
-| Argo CD | <http://argocd.localhost:8080> | `admin`, generated password |
+| Service | On this host | Home network | Login |
+| --- | --- | --- | --- |
+| Chat | <http://chat.localhost:8080> | `https://chat.lab.internal` | First registered account becomes admin; sign-ups are then disabled |
+| LLM API | <http://llm.localhost:8080/v1> | — | None |
+| Grafana | <http://grafana.localhost:8080> | `https://grafana.lab.internal` | Generated credentials |
+| Argo CD | <http://argocd.localhost:8080> | — | `admin`, generated password |
 
 See [operations](docs/operations.md) for credential commands, API examples,
-Prometheus access, logs, and troubleshooting. These `.localhost` addresses are
-for the host itself; phone and remote access need separate networking and
-authentication configuration.
+Prometheus access, logs, and troubleshooting. The `.localhost` addresses work
+on the host itself. Home-network addresses need a cluster created with
+`LAN_ADDRESS`, plus router and device setup; see
+[home network access](docs/operations.md#home-network-access). The LLM API and
+Argo CD stay on this host because they are unauthenticated or control the
+cluster.
 
 ## Day-to-day commands
 
@@ -85,7 +90,7 @@ weights and host-side backups survive cluster deletion.
 | `ansible/` | Ubuntu host configuration and tool installation |
 | `scripts/` | Bootstrap, model download, backup and recovery |
 | `kubernetes/clusters/dev/` | Flux reconciliation and dependency ordering |
-| `kubernetes/infrastructure/` | Gateway, monitoring, logging, Argo CD, LLM and chat |
+| `kubernetes/infrastructure/` | Gateway, cert-manager, monitoring, logging, Argo CD, LLM and chat |
 | `kubernetes/kind/` | Dev template and an unused `homelab-lab` configuration |
 | `tests/` | Bootstrap and recovery regressions |
 | `docs/` | Operations and recovery guides |

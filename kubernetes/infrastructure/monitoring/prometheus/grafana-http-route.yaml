@@ -6,10 +6,14 @@ metadata:
 spec:
   hostnames:
     - grafana.localhost
+    - grafana.lab.internal
   parentRefs:
     - name: homelab
       namespace: gateway-system
       sectionName: http
+    - name: homelab
+      namespace: gateway-system
+      sectionName: lan
   rules:
     - matches:
         - path:

@@ -11,8 +11,16 @@ cluster_config="${repository_root}/kubernetes/kind/dev.yaml"
 rendered_cluster_config=""
 gateway_node_port="30080"
 gateway_host_port="8080"
+lan_node_port="30443"
+lan_host_port="443"
 models_dir="${MODELS_DIR:-${HOME}/models}"
 llm_node_label="homelab.local/llm-capable"
+# Home-network access is opt-in: a cluster created without LAN_ADDRESS keeps
+# the lan listener on loopback. The root certificate authority lives on the
+# host, outside Git and the cluster, so devices that trust it survive rebuilds.
+lan_address="${LAN_ADDRESS:-}"
+lab_domain="lab.internal"
+lab_ca_dir="${LAB_CA_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/homelab/lab-ca}"
 
 validate_gpu_directory() {
   local gpu_directory="${1:-/dev/dri}"
@@ -34,18 +42,131 @@ render_cluster_config() {
 
   # A JSON string is also a YAML quoted scalar. This preserves spaces,
   # quotes, backslashes and other characters without evaluating the path.
-  python3 - "${cluster_config}" "${models_dir}" "${output_path}" <<'PY'
+  python3 - "${cluster_config}" "${models_dir}" "${lan_address:-127.0.0.1}" "${output_path}" <<'PY'
 import json
 import pathlib
 import sys
 
-source, models_dir, output = sys.argv[1:]
+source, models_dir, lan_address, output = sys.argv[1:]
 config = pathlib.Path(source).read_text()
-marker = '"__MODELS_DIR__"'
-if config.count(marker) != 2:
-    raise SystemExit("Expected two model directory placeholders in Kind configuration")
-pathlib.Path(output).write_text(config.replace(marker, json.dumps(models_dir)))
+for marker, count, value, description in (
+    ('"__MODELS_DIR__"', 2, models_dir, "two model directory placeholders"),
+    ('"__LAN_ADDRESS__"', 1, lan_address, "one LAN address placeholder"),
+):
+    if config.count(marker) != count:
+        raise SystemExit(f"Expected {description} in Kind configuration")
+    config = config.replace(marker, json.dumps(value))
+pathlib.Path(output).write_text(config)
 PY
+}
+
+validate_lan_address() {
+  if [[ -z "${lan_address}" ]]; then
+    return
+  fi
+
+  python3 - "${lan_address}" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.IPv4Address(sys.argv[1])
+except ValueError:
+    raise SystemExit(f"LAN_ADDRESS must be an IPv4 address; got {sys.argv[1]!r}.")
+private_networks = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+if not any(address in ipaddress.ip_network(network) for network in private_networks):
+    raise SystemExit(
+        f"LAN_ADDRESS {address} is not a private home-network address "
+        "(10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16)."
+    )
+PY
+  if ! lan_address_is_assigned "${lan_address}"; then
+    echo "LAN_ADDRESS ${lan_address} is not assigned to this host." >&2
+    echo "Check it with: ip -4 address" >&2
+    return 1
+  fi
+}
+
+lan_address_is_assigned() {
+  python3 -c 'import socket, sys; socket.socket().bind((sys.argv[1], 0))' "$1" 2>/dev/null
+}
+
+ensure_lab_ca() {
+  local certificate="${lab_ca_dir}/ca.crt"
+  local key="${lab_ca_dir}/ca.key"
+
+  if [[ -f "${certificate}" && -f "${key}" ]]; then
+    if [[ "$(openssl x509 -in "${certificate}" -noout -pubkey)" \
+      != "$(openssl pkey -in "${key}" -pubout)" ]]; then
+      echo "${key} does not belong to ${certificate}." >&2
+      return 1
+    fi
+    return
+  fi
+  if [[ -e "${certificate}" || -e "${key}" ]]; then
+    echo "Only part of the lab certificate authority exists in ${lab_ca_dir}." >&2
+    echo "Restore the missing file from your copy; bootstrap will not replace a root that devices may trust." >&2
+    return 1
+  fi
+
+  echo "Creating the lab certificate authority in ${lab_ca_dir}..."
+  mkdir -p "${lab_ca_dir}"
+  chmod 700 "${lab_ca_dir}"
+  # Name constraints limit the root to lab.internal names and forbid IP
+  # addresses, so a leaked key cannot impersonate any other site.
+  (
+    umask 077
+    openssl req -x509 -new -noenc -days 3650 \
+      -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+      -subj "/CN=Homelab ${lab_domain} CA" \
+      -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+      -addext "keyUsage=critical,keyCertSign,cRLSign" \
+      -addext "nameConstraints=critical,permitted;DNS:${lab_domain},excluded;IP:0.0.0.0/0.0.0.0,excluded;IP:0:0:0:0:0:0:0:0/0:0:0:0:0:0:0:0" \
+      -keyout "${key}.new" -out "${certificate}.new"
+    mv "${key}.new" "${key}"
+    mv "${certificate}.new" "${certificate}"
+  )
+}
+
+load_lab_ca() {
+  # Server-side apply keeps the private key out of a last-applied annotation.
+  kubectl --context "${cluster_context}" create namespace cert-manager \
+    --dry-run=client -o yaml \
+    | kubectl --context "${cluster_context}" apply \
+      --server-side --field-manager=homelab-bootstrap -f -
+  kubectl --context "${cluster_context}" --namespace cert-manager \
+    create secret tls lab-ca \
+    --cert="${lab_ca_dir}/ca.crt" --key="${lab_ca_dir}/ca.key" \
+    --dry-run=client -o yaml \
+    | kubectl --context "${cluster_context}" apply \
+      --server-side --field-manager=homelab-bootstrap -f -
+}
+
+published_lan_address() {
+  { docker port "${cluster_name}-control-plane" "${lan_node_port}/tcp" 2>/dev/null || true; } \
+    | awk -F: -v expected_port="${lan_host_port}" '
+        $NF == expected_port { print $1; exit }
+      '
+}
+
+check_existing_lan_mapping() {
+  local published
+
+  published="$(published_lan_address)"
+  if [[ -z "${lan_address}" ]]; then
+    # The address is fixed when the cluster is created, so later runs keep
+    # using it without LAN_ADDRESS.
+    if [[ -n "${published}" && "${published}" != "127.0.0.1" ]]; then
+      lan_address="${published}"
+    fi
+    return
+  fi
+  if [[ "${published}" != "${lan_address}" ]]; then
+    echo "This cluster publishes home-network HTTPS on ${published:-no address}, not ${lan_address}." >&2
+    echo "Kind fixes port mappings when a cluster is created, and the cluster has been preserved." >&2
+    echo "To change it, back up persistent data (docs/recovery.md), delete the cluster and rerun bootstrap with LAN_ADDRESS." >&2
+    return 1
+  fi
 }
 
 validate_cluster_mounts() {
@@ -127,6 +248,8 @@ wait_for_flux_kustomizations() {
   local infrastructure_manifests=(
     "${repository_root}/kubernetes/clusters/dev/infrastructure/gateway-api-controller.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/gateway-api-config.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/cert-manager.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/lab-ca.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/monitoring.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/logging.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/argocd.yaml"
@@ -204,6 +327,9 @@ wait_for_gateway_api() {
   kubectl --context "${cluster_context}" --namespace gateway-system \
     wait gateway/homelab \
     --for=condition=Programmed --timeout=5m
+  kubectl --context "${cluster_context}" --namespace gateway-system \
+    wait certificate/lab-internal \
+    --for=condition=Ready --timeout=5m
   kubectl --context "${cluster_context}" --namespace monitoring \
     wait httproute/grafana \
     --for="jsonpath={.status.parents[0].conditions[?(@.type=='Accepted')].status}=True" \
@@ -241,14 +367,34 @@ wait_for_gateway_endpoint() {
   done
 }
 
+wait_for_lan_endpoint() {
+  local hostname="$1"
+  local path="$2"
+  local deadline
+
+  deadline=$((SECONDS + 120))
+
+  until curl --noproxy '*' --fail --silent --max-time 2 \
+    --cacert "${lab_ca_dir}/ca.crt" \
+    --resolve "${hostname}:443:${lan_address}" \
+    "https://${hostname}${path}" >/dev/null; do
+    if (( SECONDS >= deadline )); then
+      echo "LAN endpoint did not become ready: https://${hostname}${path} via ${lan_address}" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
 main() {
   local existing_clusters
   local llm_nodes
   local node_name
 
-  for required_command in curl docker kind kubectl flux python3 sha256sum; do
+  for required_command in curl docker kind kubectl flux openssl python3 sha256sum; do
     require_command "${required_command}"
   done
+  validate_lan_address
 
   # Check local prerequisites before creating or changing a cluster. The check
   # verifies the pinned hashes without starting a multi-gigabyte download.
@@ -261,11 +407,13 @@ main() {
     echo "Log out and back in after running ./scripts/bootstrap-host.sh." >&2
     exit 1
   fi
+  ensure_lab_ca
 
   existing_clusters="$(kind get clusters)"
   if grep -Fxq "${cluster_name}" <<<"${existing_clusters}"; then
     echo "Kind cluster ${cluster_name} already exists."
     llm_nodes="$(validate_cluster_mounts)"
+    check_existing_lan_mapping
     if ! gateway_host_port_is_mapped; then
       echo "This cluster predates the localhost Gateway port mapping."
       echo "Bootstrap will use its Kind node address without recreating the cluster."
@@ -293,6 +441,7 @@ main() {
   done <<<"${llm_nodes}"
 
   bootstrap_flux
+  load_lab_ca
 
   echo "Reconciling the latest Git revision..."
   flux reconcile kustomization flux-system \
@@ -307,6 +456,10 @@ main() {
   wait_for_gateway_endpoint argocd.localhost /healthz
   wait_for_gateway_endpoint llm.localhost /health
   wait_for_gateway_endpoint chat.localhost /health
+  if [[ -n "${lan_address}" ]]; then
+    wait_for_lan_endpoint "chat.${lab_domain}" /health
+    wait_for_lan_endpoint "grafana.${lab_domain}" /api/health
+  fi
 
   echo
   echo "Dev environment is ready."
@@ -328,6 +481,15 @@ main() {
   printf '%s\n' "kubectl --context ${cluster_context} -n argocd get secret argocd-initial-admin-secret -o go-template='{{ index .data \"password\" | base64decode }}{{ \"\\n\" }}'"
   echo "Read the generated Grafana login with:"
   printf '%s\n' "kubectl --context ${cluster_context} -n monitoring get secret kube-prometheus-stack-grafana -o go-template='user: {{ index .data \"admin-user\" | base64decode }}{{ \"\\n\" }}password: {{ index .data \"admin-password\" | base64decode }}{{ \"\\n\" }}'"
+  echo
+  if [[ -n "${lan_address}" ]]; then
+    echo "Home network: https://chat.${lab_domain} and https://grafana.${lab_domain} via ${lan_address}."
+    echo "Devices need router DNS entries for these names pointing at ${lan_address},"
+    echo "and must trust the root certificate ${lab_ca_dir}/ca.crt (docs/operations.md)."
+  else
+    echo "Home-network access is off. Enabling it requires a cluster created with"
+    echo "LAN_ADDRESS set to this host's private IPv4 address (docs/operations.md)."
+  fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

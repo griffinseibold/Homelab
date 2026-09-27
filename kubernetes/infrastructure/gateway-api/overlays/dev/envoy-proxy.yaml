@@ -19,3 +19,7 @@ spec:
                   port: 80
                   protocol: TCP
                   nodePort: 30080
+                - name: https-443
+                  port: 443
+                  protocol: TCP
+                  nodePort: 30443

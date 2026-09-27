@@ -30,6 +30,105 @@ It schedules on workers labeled `homelab.local/llm-capable=true`, where the
 bootstrap has checked read-only model mounts and `/dev/dri` device mounts.
 Both workers share the same physical GPU; they do not provide two GPUs.
 
+## Home network access
+
+Phones and laptops on your Wi-Fi can use chat, Grafana and opted-in
+applications over HTTPS, for example `https://chat.lab.internal`. The LLM API
+and Argo CD are never offered on the home network. Access is off unless the
+cluster was created with `LAN_ADDRESS`, and it is never published to the
+internet:
+
+- Kind publishes the Gateway's `lan` listener on port 443 of one private IPv4
+  address, `LAN_ADDRESS`. It is not published on `0.0.0.0` or on the host's
+  public IPv6 address.
+- Only namespaces labeled `gateway.homelab/lan: "true"` can attach routes to
+  the listener. Other routes return 404 there, even with a forged `Host` header.
+- Certificates come from your own root certificate authority. Its name
+  constraints restrict it to `lab.internal` names and forbid IP addresses, so
+  a leaked key cannot impersonate any other site.
+- Your router's firewall remains the outer boundary. Do not add port forwards
+  for this host.
+
+### One-time setup
+
+1. **Reserve the host's address.** In your router's DHCP settings, give this
+   host a fixed address. Find its current address with `ip -4 address`.
+2. **Add router DNS entries** for each name, such as `chat.lab.internal` and
+   `grafana.lab.internal`, pointing to that address. Devices must use the router
+   for DNS; a VPN or a custom Private DNS setting on a phone bypasses it.
+3. **Apply the host configuration** with `./scripts/bootstrap-host.sh`. It sets
+   `net.ipv4.ip_nonlocal_bind`, so Docker can publish the address at boot even
+   if DHCP assigns it moments later. Without that setting, the control-plane
+   node can fail to start after a reboot.
+4. **Create the cluster with the address.** Kind fixes port mappings when a
+   cluster is created, so an existing cluster must be backed up, deleted and
+   restored ([recovery](recovery.md)):
+
+   ```bash
+   ./scripts/backup-dev.py create
+   kind delete cluster --name homelab-dev
+   LAN_ADDRESS=192.168.1.50 ./scripts/bootstrap-dev.sh   # this host's address
+   ```
+
+   Later runs reuse the address the cluster was created with, so `LAN_ADDRESS`
+   can be omitted. A different address stops bootstrap without changing the
+   cluster.
+5. **Trust the root certificate on each device.** The first bootstrap creates
+   it in `~/.config/homelab/lab-ca/` (or `LAB_CA_DIR`). Copy only `ca.crt` to
+   the device, by email or a cloud drive for example. **Never copy `ca.key`.**
+   - iPhone: open `ca.crt` and allow the profile download. Then go to Settings
+     > General > VPN & Device Management and install it. Finally, go to Settings >
+     General > About > Certificate Trust Settings and turn on full trust for
+     "Homelab lab.internal CA".
+   - Android: Settings > Security > Encryption & credentials > Install a
+     certificate > CA certificate, then choose `ca.crt`. Menu names vary by
+     manufacturer. Browsers trust it; many other apps ignore user certificates.
+6. **Open the site with its scheme** the first time, for example
+   `https://chat.lab.internal`. Browsers treat an unfamiliar ending such as
+   `.internal` as a search unless `https://` is typed. Bookmark it afterwards.
+
+Open WebUI lets the first account register and become administrator; later
+sign-ups are disabled. An existing installation keeps the setting stored in
+its database, so check Admin Panel > Settings > General and turn off
+**Enable New Sign Ups** if it is still on.
+
+### Adding an application
+
+In the application's chart, label its namespace `gateway.homelab/lan: "true"`
+and give its `HTTPRoute` a hostname such as `hello-crud.lab.internal` plus a
+second parent reference to listener `lan`:
+
+```yaml
+parentRefs:
+  - name: homelab
+    namespace: gateway-system
+    sectionName: http
+  - name: homelab
+    namespace: gateway-system
+    sectionName: lan
+```
+
+Then add the hostname to your router's DNS. The wildcard certificate already
+covers any `*.lab.internal` name. Anyone on your Wi-Fi can use an exposed
+application, so prefer applications that have their own login.
+
+### Turning it off
+
+To withdraw one application, remove its namespace label and `lan` parent
+reference. To close the listener for everything, delete the `lan` listener
+from [`gateway.yaml`](../kubernetes/infrastructure/gateway-api/overlays/dev/gateway.yaml)
+and push; Flux removes it within its sync interval. The port mapping itself
+stays until the cluster is recreated without `LAN_ADDRESS`.
+
+| Symptom | Next check |
+| --- | --- |
+| Name does not resolve on the phone | The router DNS entry; Wi-Fi rather than mobile data; no VPN or custom Private DNS |
+| Connection refused or times out | `docker port homelab-dev-control-plane 30443/tcp` shows the LAN address; the host still has that address |
+| Cluster down after a reboot; Docker logs `cannot assign requested address` | Run `./scripts/bootstrap-host.sh`, then `docker start homelab-dev-control-plane`. If the address changed, restore the DHCP reservation |
+| Certificate warning | The device trusts `ca.crt` (iPhone also needs full trust enabled) |
+| 404 on the home network only | The namespace label and `lan` parent reference; `kubectl --context kind-homelab-dev get httproutes -A` |
+| `lab-ca` Flux Kustomization not ready | Rerun bootstrap so it loads the root into `cert-manager/lab-ca` |
+
 ## Applications
 
 Register an Argo CD Application pointing to the application's repository and
@@ -40,6 +139,8 @@ For Gateway access, the chart must supply an `HTTPRoute` attached to
 `gateway-system/homelab`, listener `http`, and label its namespace
 `gateway.homelab/access: public`. Use a hostname such as
 `hello-crud.localhost`. A route without hostnames is the catch-all.
+To also reach it from phones on your Wi-Fi, see
+[adding an application](#adding-an-application) to the home network.
 
 Applications, ApplicationSets and AppProjects are exported by the backup
 script. They can be registered manually again or imported after data recovery.

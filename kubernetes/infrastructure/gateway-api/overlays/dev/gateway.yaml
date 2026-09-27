@@ -15,3 +15,20 @@ spec:
           selector:
             matchLabels:
               gateway.homelab/access: public
+    # Home-network HTTPS. scripts/bootstrap-dev.sh publishes this listener on
+    # the host's LAN address only when LAN_ADDRESS is set. Namespaces must
+    # opt in separately, so loopback-only services stay off the network.
+    - name: lan
+      protocol: HTTPS
+      port: 443
+      hostname: "*.lab.internal"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: lab-internal-tls
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              gateway.homelab/lan: "true"

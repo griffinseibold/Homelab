@@ -32,6 +32,13 @@ spec:
     openaiBaseApiUrl: http://llama-server.llm.svc.cluster.local/v1
     # llama-server does not check API keys; the chart requires a value.
     openaiApiKey: homelab-local
+    # Chat is reachable from the home network, so only the first account
+    # (the administrator) may register. Open WebUI keeps this setting in its
+    # database once saved; an existing install may also need it switched off
+    # under Admin Panel > Settings > General.
+    extraEnvVars:
+      - name: ENABLE_SIGNUP
+        value: "false"
     persistence:
       enabled: true
       size: 2Gi
@@ -39,7 +46,11 @@ spec:
       enabled: true
       hostnames:
         - chat.localhost
+        - chat.lab.internal
       parentRefs:
         - name: homelab
           namespace: gateway-system
           sectionName: http
+        - name: homelab
+          namespace: gateway-system
+          sectionName: lan
