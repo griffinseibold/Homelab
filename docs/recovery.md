@@ -159,6 +159,12 @@ kubectl --context kind-homelab-dev apply --dry-run=server -f /path/to/verified-b
 kubectl --context kind-homelab-dev apply -f /path/to/verified-backup/argocd.json
 ```
 
+A backup taken in llm mode (`"lab_mode": "llm"` in `manifest.json`) holds
+Applications with automated sync paused and their original policy saved in
+the `homelab.local/saved-sync-policy` annotation. After applying them, run
+`./scripts/lab-mode.py apps` to restore their sync. A rebuilt cluster starts in
+apps mode.
+
 These declarations point at application repositories and revisions; they do
 not contain the source itself. Recreate private repository/cluster credentials
 and required Kubernetes Secrets separately. A server dry run may need to be
