@@ -7,10 +7,9 @@ apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
   name: amd-gpu
-# No node labels or taints: the host has one GPU node. On k3s, AMD's device
-# plugin advertises the Radeon as amd.com/gpu; Kind has no device plugin,
-# so there a Job asking for amd.com/gpu is admitted but its pod stays
-# Pending, because no node offers the resource.
+# No node labels or taints: k3s runs on one node, where AMD's device plugin
+# (kubernetes/infrastructure/gpu) advertises the Radeon as amd.com/gpu. The
+# device plugin, not Kueue, decides which pod actually holds it.
 spec: {}
 ---
 apiVersion: kueue.x-k8s.io/v1beta2

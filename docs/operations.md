@@ -41,6 +41,8 @@ one pod holds the GPU at a time. Another pod requesting it waits as
 `Pending` (`Insufficient amd.com/gpu`) until the holder stops, so a training
 job and the LLM take turns: in apps mode the LLM is stopped unless an
 application requests it, and `./scripts/lab-mode.py status` shows who does.
+Batch Jobs can also wait their turn in order through Kueue; see
+[streaming and batch queueing](#kueue-and-the-llm-share-one-gpu).
 A GPU workload's pod should also add the host's `render` and `video` group
 IDs as `supplementalGroups` so it can open the device nodes; read them with
 `kubectl --context homelab-dev -n flux-system get configmap homelab-host -o yaml`

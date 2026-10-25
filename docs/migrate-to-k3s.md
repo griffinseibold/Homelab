@@ -150,6 +150,7 @@ kubectl --context homelab-dev -n monitoring scale deployment kube-prometheus-sta
 kubectl --context homelab-dev -n monitoring scale statefulset loki --replicas=0
 kubectl --context homelab-dev -n ml-storage scale deployment garage --replicas=0
 kubectl --context homelab-dev -n mlflow scale deployment mlflow --replicas=0
+kubectl --context homelab-dev -n kafka scale deployment kafka --replicas=0
 ```
 
 Prometheus is managed by its operator, which would restart it. Pause it
@@ -164,7 +165,7 @@ Wait until those pods are gone:
 
 ```bash
 kubectl --context homelab-dev get pods -n chat -n monitoring
-kubectl --context homelab-dev get pods -A | grep -E 'open-webui|grafana|loki-0|garage|mlflow|prometheus-kube'
+kubectl --context homelab-dev get pods -A | grep -E 'open-webui|grafana|loki-0|garage|mlflow|kafka-[a-z0-9]+-[a-z0-9]{5}\b|prometheus-kube'
 ```
 
 The second command must print nothing (Alloy and node-exporter may keep
@@ -184,7 +185,8 @@ for claim in \
   monitoring/kube-prometheus-stack-grafana \
   monitoring/storage-loki-0 \
   ml-storage/garage \
-  mlflow/mlflow
+  mlflow/mlflow \
+  kafka/kafka
 do
   ./scripts/backup-dev.py empty-claim "${claim}" --replace
   ./scripts/backup-dev.py restore-volume "${backup}" "${claim}"
@@ -192,9 +194,10 @@ done
 ```
 
 Each restore asks for sudo once, then freezes the cluster for the copy. A
-claim that is not in the backup (for example `ml-storage/garage` if Kind
-never ran the ML platform) fails with "Backup does not contain exactly one
-volume"; skip it. Check the exact names in the list from step 2; Open
+claim that is not in the backup (for example `ml-storage/garage` or
+`kafka/kafka` if Kind never ran them) fails with "Backup does not contain
+exactly one volume"; skip it. Kafka's restored volume keeps working because
+its cluster ID is fixed in `kafka.yaml`. Check the exact names in the list from step 2; Open
 WebUI's claim may be named `open-webui` or `open-webui-open-webui-0`
 depending on how its chart created it.
 
@@ -235,7 +238,7 @@ flux resume kustomization --all --context homelab-dev
 ```
 
 Resuming Flux restores the Deployments and StatefulSets you scaled down:
-Garage, MLflow and llm-demand from their manifests, Grafana and Loki through
+Garage, MLflow, Kafka and llm-demand from their manifests, Grafana and Loki through
 Helm drift correction. The chat stays stopped in apps mode; llm-demand
 starts it in llm mode.
 Bootstrap then rewrites MLflow's S3 credentials from the restored Garage key
@@ -281,6 +284,13 @@ Work through this list before deleting Kind.
       logs from before the migration.
 - [ ] MLflow at <http://mlflow.localhost:8080> lists earlier experiments and
       opens an artifact.
+- [ ] Kafka still has its topics and consumer group offsets:
+      `kubectl --context homelab-dev -n kafka exec deploy/kafka -- /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --all-groups`,
+      and the [Kafka dashboard](http://grafana.localhost:8080/d/homelab-kafka)
+      shows the broker Up.
+- [ ] `kubectl --context homelab-dev describe clusterqueue gpu` lists
+      `amd.com/gpu` with a nominal quota of 1, and a GPU Job from an
+      application's LocalQueue is admitted and runs while the LLM is stopped.
 - [ ] Argo CD at <http://argocd.localhost:8080>: every application Synced and
       Healthy; each application shows its old data.
 - [ ] Exposure on the host: `curl --noproxy '*' -sI http://grafana.localhost:8080`
