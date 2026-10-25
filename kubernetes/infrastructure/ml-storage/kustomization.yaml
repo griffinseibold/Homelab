@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ml-storage
+resources:
+  - namespace.yaml
+  - garage.yaml
+  - service-monitor.yaml
+  - setup/job.yaml
+configMapGenerator:
+  # Both names get a content hash: a configuration change rolls Garage, and a
+  # script change replaces the setup Job.
+  - name: garage-config
+    files:
+      - garage.toml
+  - name: garage-setup-script
+    files:
+      - setup/setup.py

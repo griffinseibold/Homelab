@@ -1,0 +1,17 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: garage
+  labels:
+    app.kubernetes.io/name: garage
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: garage
+      app.kubernetes.io/component: admin
+  endpoints:
+    # Garage serves /metrics without a token when no metrics_token is set.
+    - port: admin
+      path: /metrics
+      interval: 60s
+      scrapeTimeout: 10s

@@ -1,0 +1,22 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: ml-storage
+  namespace: flux-system
+spec:
+  dependsOn:
+    # The ServiceMonitor CRD comes from kube-prometheus-stack.
+    - name: monitoring
+  interval: 10m
+  retryInterval: 2m
+  # Includes the setup Job, which waits for Garage and creates the buckets.
+  # Garage cannot start until scripts/bootstrap-dev.sh has loaded its
+  # Secret, so this stays not ready until then without affecting the rest
+  # of the platform.
+  timeout: 15m
+  path: ./kubernetes/infrastructure/ml-storage
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system

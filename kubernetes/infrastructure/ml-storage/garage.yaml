@@ -1,0 +1,139 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: garage
+  labels:
+    app.kubernetes.io/name: garage
+spec:
+  # The cluster's default storage class. Garage keeps its metadata database
+  # and object blocks in subdirectories of this one volume, so a backup or
+  # restore handles a single claim.
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: garage
+  labels:
+    app.kubernetes.io/name: garage
+spec:
+  # One node owns one volume: Recreate keeps a second pod from opening the
+  # same database during an update.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: garage
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: garage
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # The image is a single static binary with no users; any unprivileged
+        # ID works. Local-path volumes are created world-writable.
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: garage
+          image: dxflrs/garage:v2.4.1
+          # --single-node assigns this node a layout covering the whole data
+          # directory on first start (Garage 2.3.0 and later), so no manual
+          # `garage layout assign` is needed. The setup Job verifies it.
+          command: ["/garage", "server", "--single-node"]
+          envFrom:
+            # GARAGE_RPC_SECRET and GARAGE_ADMIN_TOKEN, loaded by
+            # scripts/bootstrap-dev.sh from values kept on the host.
+            - secretRef:
+                name: garage
+          env:
+            - name: RUST_LOG
+              value: garage=info
+          ports:
+            - name: s3
+              containerPort: 3900
+            - name: admin
+              containerPort: 3903
+          # /health answers 200 once the node has a layout and quorum, which
+          # for one node means it can serve requests.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: admin
+            periodSeconds: 10
+          # Liveness only checks the process answers, so a layout problem
+          # shows as not ready instead of a restart loop.
+          livenessProbe:
+            tcpSocket:
+              port: admin
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/garage.toml
+              subPath: garage.toml
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/garage
+      volumes:
+        - name: config
+          configMap:
+            # Generated with a content hash, so a configuration change rolls
+            # the pod.
+            name: garage-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: garage
+---
+# The contract endpoint for applications and MLflow:
+# http://s3.ml-storage.svc.cluster.local:9000, path-style addressing.
+apiVersion: v1
+kind: Service
+metadata:
+  name: s3
+  labels:
+    app.kubernetes.io/name: garage
+spec:
+  selector:
+    app.kubernetes.io/name: garage
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+---
+# The admin API (token required) for the setup Job, plus unauthenticated
+# /health and /metrics. Only reachable inside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage-admin
+  labels:
+    app.kubernetes.io/name: garage
+    app.kubernetes.io/component: admin
+spec:
+  selector:
+    app.kubernetes.io/name: garage
+  ports:
+    - name: admin
+      port: 3903
+      targetPort: admin

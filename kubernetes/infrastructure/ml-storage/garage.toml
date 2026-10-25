@@ -1,0 +1,39 @@
+# Single-node Garage: the in-cluster S3 endpoint for datasets, checkpoints
+# and MLflow artifacts. Reference:
+# https://garagehq.deuxfleurs.fr/documentation/reference-manual/configuration/
+#
+# Secrets are not in this file. GARAGE_RPC_SECRET and GARAGE_ADMIN_TOKEN come
+# from the garage Secret, which scripts/bootstrap-dev.sh loads from values
+# generated once on the host. Environment variables rather than *_file
+# settings, because Garage refuses secret files that are group-readable, and
+# a Secret volume readable by this non-root pod has to be.
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+# LMDB, the default, can be corrupted by an unclean shutdown, and a backup
+# pauses the cluster mid-write. SQLite recovers from that and is plenty for
+# one user.
+db_engine = "sqlite"
+# One node, one copy. Required by `garage server --single-node`; the
+# protection against disk loss is the host-side backup, not replication.
+replication_factor = 1
+# Garage's own consistent metadata snapshots, kept beside the database. A
+# restored crash-consistent backup can fall back to one of them.
+metadata_auto_snapshot_interval = "6h"
+
+# Node-to-node RPC is unused with one node; keep it inside the pod. The
+# `garage json-api` command (used by scripts/ml-credentials.py through
+# kubectl exec) connects here.
+rpc_bind_addr = "127.0.0.1:3901"
+rpc_public_addr = "127.0.0.1:3901"
+
+[s3_api]
+api_bind_addr = "0.0.0.0:3900"
+# boto3 and most S3 clients sign for us-east-1 when no region is configured,
+# so this region works without per-client settings. Path-style addressing is
+# always on; there is no root_domain because nothing uses virtual hosts.
+s3_region = "us-east-1"
+
+[admin]
+# The admin API needs the admin token; /health and /metrics do not.
+api_bind_addr = "0.0.0.0:3903"
