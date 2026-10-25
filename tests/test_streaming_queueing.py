@@ -263,6 +263,10 @@ class FluxOrderingTests(unittest.TestCase):
             self.assertIn(f"  - {name}\n", listed)
             self.assertIn(f"/kubernetes/clusters/dev/infrastructure/{name}\"", bootstrap)
 
+    def test_kafka_shell_variables_are_not_substituted_by_flux(self):
+        self.assertIn("${AGENT_PATH}", (KAFKA / "kafka.yaml").read_text())
+        self.assertNotIn("\n  postBuild:", (FLUX / "kafka.yaml").read_text())
+
     def test_service_monitor_users_depend_on_monitoring(self):
         for name in ("kafka.yaml", "kueue.yaml"):
             self.assertIn("dependsOn:\n    # ", (FLUX / name).read_text())
