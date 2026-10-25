@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kueue-system
+  labels:
+    # The chart's controller runs as non-root with no capabilities and a
+    # read-only root filesystem, so the strictest profile fits.
+    pod-security.kubernetes.io/enforce: restricted

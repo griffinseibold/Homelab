@@ -1,0 +1,17 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: kueue
+  namespace: kueue-system
+spec:
+  interval: 1h
+  # The chart Kueue's own release process pushes, as its README documents:
+  # https://github.com/kubernetes-sigs/kueue/blob/v0.20.3/charts/kueue/README.md
+  url: oci://registry.k8s.io/kueue/charts/kueue
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  ref:
+    # The current release (October 2026). The released chart pins the
+    # controller image to registry.k8s.io/kueue/kueue:v0.20.3.
+    tag: 0.20.3

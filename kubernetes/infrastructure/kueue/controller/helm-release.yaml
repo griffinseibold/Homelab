@@ -1,0 +1,95 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kueue
+  namespace: kueue-system
+spec:
+  interval: 30m
+  releaseName: kueue
+  chartRef:
+    kind: OCIRepository
+    name: kueue
+  # Kueue's own certificate controller writes the CA bundle into its webhook
+  # configurations and CRD conversion settings after install. Drift detection
+  # compares only the fields this chart renders (a server-side apply dry
+  # run), so those runtime fields do not count as drift; cert-manager's
+  # HelmRelease works the same way.
+  driftDetection:
+    mode: enabled
+  install:
+    remediation:
+      retries: -1
+  upgrade:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  # The chart templates its CRDs rather than shipping them in crds/, so they
+  # are upgraded with the release. Removing this HelmRelease would uninstall
+  # them too, deleting every LocalQueue and Workload in the cluster.
+  values:
+    # A ServiceMonitor for the controller's metrics (pending and admitted
+    # workloads per ClusterQueue, admission wait time). It scrapes over HTTPS
+    # with Prometheus's service account token, which the controller checks
+    # with a SubjectAccessReview; kube-prometheus-stack's Prometheus may
+    # `get /metrics`. The chart's extra Role for a "prometheus-k8s" account
+    # is unused here and harmless.
+    enablePrometheus: true
+    controllerManager:
+      manager:
+        # The chart asks for half a core and 512 Mi; one ClusterQueue and a
+        # handful of Jobs need far less. No CPU limit, like the rest of the
+        # platform.
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            memory: 512Mi
+    managerConfig:
+      # The chart's default configuration, narrowed in three places (marked
+      # below). The chart adds internalCertManagement itself.
+      controllerManagerConfigYaml: |-
+        apiVersion: config.kueue.x-k8s.io/v1beta2
+        kind: Configuration
+        health:
+          healthProbeBindAddress: :8081
+        metrics:
+          bindAddress: :8443
+        webhook:
+          port: 9443
+        leaderElection:
+          leaderElect: true
+          resourceName: c1f6bfd2.kueue.x-k8s.io
+        controller:
+          groupKindConcurrency:
+            Job.batch: 5
+            Pod: 5
+            Workload.kueue.x-k8s.io: 10
+            LocalQueue.kueue.x-k8s.io: 5
+            Cohort.kueue.x-k8s.io: 1
+            ClusterQueue.kueue.x-k8s.io: 5
+            ResourceFlavor.kueue.x-k8s.io: 1
+        clientConnection:
+          qps: 300
+          burst: 500
+        # (1) Only batch Jobs are queued. The chart's default also manages
+        # plain Pods, Deployments and StatefulSets, which puts a fail-closed
+        # webhook in front of every pod created in the cluster: with Kueue
+        # down, nothing could start. The LLM and inference Deployments stay
+        # outside Kueue (docs/operations.md explains what that means for the
+        # GPU).
+        integrations:
+          frameworks:
+            - batch/job
+        # (2) Kueue only looks at namespaces that opted in with this label,
+        # the same one the gpu ClusterQueue admits. Its webhooks use the same
+        # selector, so Jobs everywhere else never pass through Kueue, even
+        # with a queue-name label.
+        managedJobsNamespaceSelector:
+          matchLabels:
+            kueue.homelab/queues: "true"
+        # (3) Quota counts only cpu, memory and amd.com/gpu, the resources
+        # the ClusterQueue declares. With the default (BlockUndeclared) a Job
+        # that also asked for ephemeral-storage, say, could never be admitted.
+        resources:
+          quotaCheckStrategy: IgnoreUndeclared
