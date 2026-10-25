@@ -1,9 +1,10 @@
 # Homelab
 
 A reproducible Ubuntu development platform with Kubernetes, GitOps, monitoring,
-a GPU-backed local chat service, and S3 storage plus experiment tracking for
-machine-learning work. Ansible configures the host; Flux manages
-the platform; Argo CD deploys applications from their own repositories.
+a GPU-backed local chat service, and S3 storage, experiment tracking, event
+streaming and batch queueing for machine-learning work. Ansible configures the
+host; Flux manages the platform; Argo CD deploys applications from their own
+repositories.
 
 ```text
 Ubuntu → Docker → Kind: homelab-dev (one control plane, two workers)
@@ -14,6 +15,8 @@ Ubuntu → Docker → Kind: homelab-dev (one control plane, two workers)
                     │    └─ llm-demand controller → scales the LLM and Open WebUI
                     ├─ Garage → in-cluster S3 (datasets, checkpoints, MLflow artifacts)
                     ├─ MLflow → experiment tracking
+                    ├─ Kafka (one KRaft broker) → event streams between services
+                    ├─ Kueue → queues batch Jobs for the GPU
                     └─ Argo CD → independently registered applications
 ```
 
@@ -91,6 +94,9 @@ cluster; so does MLflow, which has no login. Inside the cluster, applications
 use S3 at `http://s3.ml-storage.svc.cluster.local:9000` and MLflow at
 `http://mlflow.mlflow.svc.cluster.local:5000`; see
 [ML storage and experiment tracking](docs/operations.md#ml-storage-and-experiment-tracking).
+They stream events through Kafka at `kafka.kafka.svc.cluster.local:9092` and
+queue GPU Jobs through Kueue's ClusterQueue `gpu`; see
+[streaming and batch queueing](docs/operations.md#streaming-and-batch-queueing).
 
 ## Day-to-day commands
 
@@ -117,9 +123,9 @@ weights and host-side backups survive cluster deletion.
 | `ansible/` | Ubuntu host configuration and tool installation |
 | `scripts/` | Bootstrap, model download, lab mode switch, S3 credentials, backup and recovery |
 | `kubernetes/clusters/dev/` | Flux reconciliation and dependency ordering |
-| `kubernetes/infrastructure/` | Gateway, cert-manager, monitoring, logging, Argo CD, LLM, chat, S3 storage and MLflow |
+| `kubernetes/infrastructure/` | Gateway, cert-manager, monitoring, logging, Argo CD, LLM, chat, S3 storage, MLflow, Kafka and Kueue |
 | `kubernetes/kind/` | Dev template and an unused `homelab-lab` configuration |
-| `tests/` | Bootstrap, recovery, LLM demand, lab mode, S3 setup and credential regressions |
+| `tests/` | Bootstrap, recovery, LLM demand, lab mode, S3 setup, credential, Kafka and Kueue regressions |
 | `docs/` | Operations and recovery guides |
 
 Applications stay in their own repositories; register them through Argo CD.
@@ -134,7 +140,7 @@ that uses the LLM labels its Deployment or StatefulSet
 ## Current priorities
 
 This revision closes bootstrap portability and incomplete-download gaps, then
-adds three capabilities:
+adds these capabilities:
 
 1. **Recovery:** verified host-side PVC archives, Argo registration export,
    and restoration into an empty, unused volume.
@@ -144,6 +150,8 @@ adds three capabilities:
    it, and an LLM mode pauses every application for personal chat.
 4. **ML platform:** S3-compatible object storage (Garage) and an MLflow
    tracking server for GPU training and inference projects.
+5. **Streaming and queueing:** a single-broker Kafka for event streams and
+   Kueue to queue batch Jobs for the one GPU.
 
 The next operational gaps are off-host encrypted backups, an external alert
 receiver, and managed secrets. Public access would also require authentication

@@ -63,8 +63,8 @@ namespaces to zero, saving each previous replica count in
 then the sync policies, and removes the annotations. Both are safe to rerun
 after an interruption, and running `llm` twice never overwrites what was saved
 the first time. Platform namespaces (`argocd`, `flux-system`, `monitoring`,
-`llm`, `chat`, `ml-storage`, `mlflow` and the other platform and Kubernetes
-system namespaces) are
+`llm`, `chat`, `ml-storage`, `mlflow`, `kafka`, `kueue-system` and the other
+platform and Kubernetes system namespaces) are
 never touched; an Application that deploys into one is left running with a
 warning.
 
@@ -225,6 +225,176 @@ expect, rather than guessing.
 | Artifact upload fails | MLflow log; `./scripts/ml-credentials.py mlflow --bucket mlflow-artifacts` restores its key's permissions |
 | S3 client gets `NoSuchBucket` or DNS errors for `BUCKET.s3...` | The client uses virtual-host addressing; switch it to path-style |
 
+## Streaming and batch queueing
+
+Two more platform services for applications such as GPU training and
+inference projects. Flux manages both, and llm mode never stops them.
+
+| | Inside the cluster | What it is for |
+| --- | --- | --- |
+| Kafka | `kafka.kafka.svc.cluster.local:9092` | Event streams between services |
+| Kueue | ClusterQueue `gpu` | Queueing batch Jobs for the one GPU |
+
+Neither is reachable from this host's browser or the home network. Kafka has
+no login, so it stays inside the cluster.
+
+### Kafka: the contract
+
+- **Address.** Bootstrap with `kafka.kafka.svc.cluster.local:9092`, protocol
+  `PLAINTEXT` (no TLS, no authentication). The broker tells clients to
+  reconnect to that same name, so it only works from pods in the cluster.
+- **Topics.** Automatic topic creation is **off**. An application creates
+  the topics it needs when it starts, with **replication factor 1** (there is
+  one broker), and treats "topic already exists" as success. Picking the
+  partition count is up to the application; one is the default.
+- **Retention.** Kafka keeps a partition's messages for **7 days** or until
+  the partition holds **2 GiB**, whichever comes first, then deletes the
+  oldest. The size limit is per partition, so a three-partition topic can
+  hold up to 6 GiB. All topics share one 20 Gi volume, which keeps every
+  topic's history plus Kafka's own metadata. A topic that needs less (or
+  more) sets `retention.ms` or `retention.bytes` when it is created.
+- **Consumer groups.** Commit offsets as usual; Kafka keeps them in its own
+  internal topic. Lag per group and topic is on the Kafka dashboard.
+
+For example, in Python with `confluent-kafka`:
+
+```python
+from confluent_kafka import KafkaError
+from confluent_kafka.admin import AdminClient, NewTopic
+
+admin = AdminClient({"bootstrap.servers": "kafka.kafka.svc.cluster.local:9092"})
+for topic, future in admin.create_topics(
+        [NewTopic("detections", num_partitions=1, replication_factor=1)]).items():
+    try:
+        future.result()
+    except Exception as error:
+        if error.args[0].code() != KafkaError.TOPIC_ALREADY_EXISTS:
+            raise
+```
+
+To look inside, run Kafka's own tools in the broker pod:
+
+```bash
+kubectl --context kind-homelab-dev -n kafka exec deploy/kafka -- \
+  /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe
+kubectl --context kind-homelab-dev -n kafka exec deploy/kafka -- \
+  /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --all-groups
+```
+
+### Kueue: the contract
+
+Kueue holds a batch Job back until the quota it asks for is free, then lets
+it start. The ClusterQueue `gpu` has one `amd.com/gpu`, 16 CPUs and 32 Gi of
+memory to hand out, so at most one admitted Job holds the GPU at a time and
+the rest wait in order. An application opts in with three things:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crosswalk
+  labels:
+    kueue.homelab/queues: "true"   # Kueue ignores namespaces without it
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: gpu
+  namespace: crosswalk
+spec:
+  clusterQueue: gpu
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: train
+  namespace: crosswalk
+  labels:
+    kueue.x-k8s.io/queue-name: gpu  # the LocalQueue's name
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: train
+          image: example/train:1.0
+          resources:
+            requests: {cpu: "4", memory: 8Gi}
+            limits: {amd.com/gpu: 1}
+```
+
+When Argo CD creates the namespace (`CreateNamespace=true`), set the label
+with the Application's `managedNamespaceMetadata`. Kueue creates each Job
+suspended, admits it when its requests fit, and records it as a `Workload`
+in the same namespace. A Job counts only the resources the ClusterQueue
+covers (`cpu`, `memory` and `amd.com/gpu`); anything else it requests is
+not limited by Kueue.
+
+Only **batch Jobs** go through Kueue. Deployments, StatefulSets and plain
+pods never do, even in a labeled namespace, so a fault in Kueue cannot stop
+ordinary workloads from starting.
+
+### Kueue and the LLM share one GPU
+
+Kueue only counts what it admitted. The LLM (llama-server) and inference
+Deployments are not Kueue workloads, so when one of them is using the GPU,
+Kueue still believes the GPU is free and admits a GPU Job. That Job's pod
+then waits **Pending** in the Kubernetes scheduler until the GPU is
+actually released: in apps mode, five minutes after the last application
+stops requesting the LLM; in llm mode, not until you switch back to apps
+mode. While it waits it keeps the queue's GPU quota, so the next GPU Job
+waits behind it in Kueue. Measuring this interaction is the subject of the
+Crosswalk project's Experiment C.
+
+On this Kind cluster no node offers `amd.com/gpu` at all: the LLM reaches
+the GPU through a privileged device mount instead of a device plugin. Kueue
+installs and admits normally, Jobs that ask only for CPU and memory run, and
+a Job asking for `amd.com/gpu` is admitted and then stays Pending. GPU Jobs
+need the k3s cluster and AMD's device plugin.
+
+### How it is set up
+
+Kafka is the official `apache/kafka:4.3.1` image, one broker that is also
+its own KRaft controller (no ZooKeeper), configured by
+[`server.properties`](../kubernetes/infrastructure/kafka/server.properties)
+on a 20 Gi volume. Plain manifests rather than the Strimzi operator: an
+operator, its CRDs and its upgrade cycle buy nothing for a single broker.
+Broker metrics come from the Prometheus JMX exporter 1.6.0 Java agent.
+The project publishes the agent as a jar, not an image, so an init container
+downloads it from GitHub on the first start, checks its SHA-256 against the
+release's, and keeps it on Kafka's volume; later starts need no network.
+Consumer group lag comes from `kafka-exporter` v1.11.0. Both are scraped by
+Prometheus and drawn on the [Kafka dashboard](http://grafana.localhost:8080/d/homelab-kafka):
+broker up, under-replicated and offline partitions, bytes in and out and
+size on disk per topic, and lag per consumer group and topic. The
+`KafkaBrokerUnavailable` alert fires after ten minutes without broker
+metrics.
+
+Kueue v0.20.3 is installed from its official chart. Its configuration
+([`helm-release.yaml`](../kubernetes/infrastructure/kueue/controller/helm-release.yaml))
+manages only batch Jobs in namespaces with the opt-in label; the
+ResourceFlavor `amd-gpu` and ClusterQueue `gpu` are in
+[`queues.yaml`](../kubernetes/infrastructure/kueue/queues/queues.yaml).
+The controller's metrics (`kueue_pending_workloads`,
+`kueue_admitted_active_workloads`, `kueue_admission_wait_time_seconds` and
+others, per ClusterQueue) are scraped by Prometheus. Removing Kueue's
+HelmRelease would also delete its CRDs and with them every LocalQueue and
+Workload.
+
+| Symptom | Next check |
+| --- | --- |
+| `kafka` Kustomization not ready; pod in `Init:Error` | `kubectl --context kind-homelab-dev -n kafka logs deploy/kafka -c fetch-jmx-agent`. The first start downloads the JMX agent from GitHub; a hash mismatch is refused on purpose |
+| Producer fails with unknown topic or partition | Automatic topic creation is off: create the topic when the application starts |
+| Topic creation fails with an invalid replication factor | There is one broker: use replication factor 1 |
+| Client cannot resolve `kafka.kafka.svc.cluster.local` | It is running outside the cluster; Kafka is only for pods in the cluster |
+| No lag for a consumer group | The group has not committed an offset yet, or `kafka-exporter` is restarting (it waits for the broker on a fresh install) |
+| Topic history shorter than expected | Retention: 7 days or 2 GiB per partition; check the topic's own `retention.*` settings with `kafka-configs.sh --describe` |
+| Job runs at once, ignoring the queue | The namespace lacks `kueue.homelab/queues: "true"`, or the Job lacks the `kueue.x-k8s.io/queue-name` label |
+| Job stays suspended with no Workload | The LocalQueue named in the label exists in the Job's namespace: `kubectl --context kind-homelab-dev -n NAMESPACE get localqueues,workloads` |
+| Workload waits with a quota message | Another admitted Job holds the GPU or the CPU and memory: `kubectl --context kind-homelab-dev describe clusterqueue gpu` |
+| Admitted Job's pod Pending with `Insufficient amd.com/gpu` | Expected on Kind (no GPU device plugin). On k3s the LLM or an inference Deployment holds the GPU; see [above](#kueue-and-the-llm-share-one-gpu) |
+| Applying a LocalQueue fails with "no matches for kind" | Kueue is not installed yet: `flux get kustomizations kueue kueue-queues --context kind-homelab-dev` |
+
 ## Home network access
 
 Phones and laptops on your Wi-Fi can use chat, Grafana and opted-in
@@ -351,8 +521,9 @@ Application source and image-publishing CI remain in the application's repo.
 
 ## Metrics and logs
 
-[Grafana](http://grafana.localhost:8080) includes Kubernetes dashboards and the
-[LLM inference dashboard](http://grafana.localhost:8080/d/homelab-llm).
+[Grafana](http://grafana.localhost:8080) includes Kubernetes dashboards, the
+[LLM inference dashboard](http://grafana.localhost:8080/d/homelab-llm) and the
+[Kafka dashboard](http://grafana.localhost:8080/d/homelab-kafka).
 The LLM dashboard shows scrape health, token throughput, active and deferred
 requests, and request history. Gaps while the LLM is scaled to zero are
 normal. Idle throughput of zero is normal too; these are server
@@ -368,7 +539,7 @@ describes what each measurement means.
 
 Prometheus retains seven days on a 5 Gi PVC. Loki retains seven days on a
 10 Gi PVC; Grafana's database uses 1 Gi and Open WebUI uses 2 Gi. Garage's
-object storage uses 50 Gi and MLflow's database 2 Gi. The `standard`
+object storage uses 50 Gi, MLflow's database 2 Gi and Kafka 20 Gi. The `standard`
 local-path storage class persists through pod restarts, but its data is inside
 Kind nodes. [Back up before deleting the cluster](recovery.md).
 
@@ -427,8 +598,8 @@ The normal `.localhost:8080` UI links require the current mapping.
 
 ## Tests
 
-Bootstrap, recovery, LLM demand controller, lab mode, Garage setup and S3
-credential regressions run with:
+Bootstrap, recovery, LLM demand controller, lab mode, Garage setup, S3
+credential, Kafka and Kueue regressions run with:
 
 ```bash
 python3 -m unittest discover -s tests

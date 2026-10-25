@@ -4,9 +4,22 @@ Kind's `standard` PVCs live inside node containers. Deleting the cluster deletes
 those volumes. Models in `MODELS_DIR` are host-mounted and survive; metrics,
 logs, dashboards, chat history, application databases, S3 objects (datasets,
 checkpoints, MLflow artifacts) and MLflow's tracking database need their own
-copy. The backup includes every bound PVC, so Garage's `ml-storage/garage`
-and MLflow's `mlflow/mlflow` claims are archived like the others. Garage's
-volume can hold up to 50 Gi; allow for it on the backup disk.
+copy. The backup includes every bound PVC, so Garage's `ml-storage/garage`,
+MLflow's `mlflow/mlflow` and Kafka's `kafka/kafka` claims are archived like
+the others. Garage's volume can hold up to 50 Gi and Kafka's 20 Gi; allow for
+them on the backup disk.
+
+Kafka's claim holds every topic, consumer group offsets and the broker's own
+metadata, plus a cached copy of the JMX exporter agent. Kafka is paused with
+everything else, so the archive is crash-consistent like the rest: on restore
+the broker checks its logs at start-up and recovers to the last write it
+completed. Kafka is a buffer between services, not a system of record, so
+messages produced during the backup may or may not be in it. Restore it
+like any application-owned volume (below): suspend the `kafka` Flux
+Kustomization and scale the broker to zero first. The restored data keeps
+working because the broker's cluster ID is fixed in `kafka.yaml`; a volume
+formatted with another ID is refused. Kueue keeps nothing on disk: its
+queues are in Git, and Workloads are recreated from their Jobs.
 
 ## Create and verify a backup
 
