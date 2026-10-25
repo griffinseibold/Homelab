@@ -13,6 +13,8 @@ spec:
   # formats the volume.
   timeout: 15m
   path: ./kubernetes/infrastructure/kafka
+  # No postBuild substitution: the broker's start command uses the shell
+  # variable ${AGENT_PATH}, which Flux would otherwise replace with nothing.
   prune: true
   wait: true
   sourceRef:
