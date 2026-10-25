@@ -425,7 +425,7 @@ Workload.
 | Workload waits with a quota message | Another admitted Job holds the GPU or the CPU and memory: `kubectl --context homelab-dev describe clusterqueue gpu` |
 | Admitted Job's pod Pending with `Insufficient amd.com/gpu` | The LLM or an inference Deployment holds the GPU (`./scripts/lab-mode.py status`), or the device plugin is not running; see [above](#kueue-and-the-llm-share-one-gpu) |
 | Applying a LocalQueue fails with "no matches for kind" | Kueue is not installed yet: `flux get kustomizations kueue kueue-queues --context homelab-dev` |
-| kubectl warns it is unable to retrieve `visibility.kueue.x-k8s.io` | Kueue's controller, which serves that API, is down: `kubectl --context homelab-dev -n kueue-system get pods` and its log |
+| kubectl warns it is unable to retrieve `visibility.kueue.x-k8s.io`, or a namespace deletion hangs | Kueue's controller, which serves that API, is down; Kubernetes cannot finish deleting namespaces while an API is unavailable. `kubectl --context homelab-dev -n kueue-system get pods` and its log |
 
 ## Home network access
 
