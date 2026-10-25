@@ -35,8 +35,8 @@ spec:
             - name: amd.com/gpu
               nominalQuota: 1
             # Generous on purpose: the GPU is the scarce resource Kueue is
-            # here to share. These leave room on the 12-core, 48 GB host for
-            # the platform and the LLM.
+            # here to share. The host has 24 hardware threads and 48 GB, so
+            # this still leaves room for the platform and the LLM.
             - name: cpu
               nominalQuota: 16
             - name: memory

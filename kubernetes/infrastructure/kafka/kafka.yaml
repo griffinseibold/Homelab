@@ -52,8 +52,8 @@ spec:
       terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true
-        # The image's appuser. fsGroup makes the volume and scratch
-        # directories writable by it whatever their initial owner.
+        # The image's appuser, which owns the installation. Local-path
+        # volumes and emptyDirs are created world-writable.
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
