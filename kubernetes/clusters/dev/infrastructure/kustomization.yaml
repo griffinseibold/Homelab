@@ -8,6 +8,7 @@ resources:
   - monitoring.yaml
   - logging.yaml
   - argocd.yaml
+  - gpu.yaml
   - llm.yaml
   - chat.yaml
   - ml-storage.yaml

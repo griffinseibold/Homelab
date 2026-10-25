@@ -19,3 +19,7 @@ configMapGenerator:
       disableNameSuffixHash: true
       labels:
         grafana_dashboard: "1"
+      annotations:
+        # The llm Flux Kustomization substitutes ${MODELS_DIR}; Grafana's own
+        # $__rate_interval variables in the dashboard must be left alone.
+        kustomize.toolkit.fluxcd.io/substitute: disabled

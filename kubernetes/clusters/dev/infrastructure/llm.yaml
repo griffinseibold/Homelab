@@ -8,6 +8,8 @@ spec:
     - name: gateway-api-config
     # ServiceMonitor and PrometheusRule CRDs come from kube-prometheus-stack.
     - name: monitoring
+    # The GPU is requested as amd.com/gpu from AMD's device plugin.
+    - name: gpu
   interval: 10m
   retryInterval: 2m
   timeout: 15m
@@ -17,3 +19,10 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
+  # MODELS_DIR, the host directory holding the verified model weights. Not
+  # optional: without it the server would mount the wrong directory, so
+  # Flux reports the missing ConfigMap instead (bootstrap-dev.sh writes it).
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: homelab-host

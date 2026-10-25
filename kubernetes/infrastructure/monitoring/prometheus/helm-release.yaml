@@ -30,7 +30,7 @@ spec:
         type: Recreate
       persistence:
         enabled: true
-        storageClassName: standard
+        storageClassName: local-path
         size: 1Gi
       grafana.ini:
         server:
@@ -40,8 +40,9 @@ spec:
           type: loki
           access: proxy
           url: http://loki.monitoring.svc.cluster.local:3100
-    # These control-plane components bind to localhost inside Kind nodes, so
-    # their scrape targets can never be reached and would show as down.
+    # k3s runs these control-plane components inside its single process and
+    # binds their metrics to localhost (and etcd is not used), so these
+    # scrape targets could never be reached and would show as down.
     kubeControllerManager:
       enabled: false
     kubeScheduler:
@@ -50,6 +51,17 @@ spec:
       enabled: false
     kubeProxy:
       enabled: false
+    prometheus-node-exporter:
+      # GPU metrics for the AMD GPU dashboard (kubernetes/infrastructure/gpu).
+      # The drm collector (off by default) reads the amdgpu driver's busy
+      # percentage and VRAM use from sysfs; hwmon, on by default, gives its
+      # temperature and power. AMD's device-metrics-exporter would need an
+      # Instinct or Radeon AI card. Setting extraArgs replaces the chart's
+      # defaults, so its two filesystem exclusions are repeated here.
+      extraArgs:
+        - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run/containerd/.+|var/lib/docker/.+|var/lib/kubelet/.+)($|/)
+        - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|erofs|sysfs|tracefs)$
+        - --collector.drm
     prometheus:
       prometheusSpec:
         # Discover ServiceMonitors and PodMonitors from every namespace
@@ -66,7 +78,7 @@ spec:
         storageSpec:
           volumeClaimTemplate:
             spec:
-              storageClassName: standard
+              storageClassName: local-path
               accessModes:
                 - ReadWriteOnce
               resources:

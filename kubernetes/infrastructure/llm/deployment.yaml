@@ -22,9 +22,21 @@ spec:
       labels:
         app.kubernetes.io/name: llama-server
     spec:
-      # Bootstrap labels workers only after verifying the model and GPU mounts.
-      nodeSelector:
-        homelab.local/llm-capable: "true"
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # The device plugin passes the GPU's /dev/kfd and /dev/dri nodes into
+        # the container with their host ownership: renderD* belongs to the
+        # host's render group and card* to video. The pod needs those group
+        # IDs, which differ between distributions, so bootstrap-dev.sh reads
+        # them from the host into the homelab-host ConfigMap.
+        supplementalGroups:
+          - ${RENDER_GID}
+          - ${VIDEO_GID}
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: llama-server
           image: ghcr.io/ggml-org/llama.cpp:server-vulkan-b10731
@@ -43,11 +55,15 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          # No privileged mode or host device mounts: AMD's device plugin
+          # allocates the GPU and mounts /dev/kfd plus the GPU's
+          # /dev/dri/card* and /dev/dri/renderD* nodes, which is what the
+          # Vulkan backend opens. With one GPU, this server and any training
+          # job queue for it through the scheduler.
           securityContext:
-            # Direct /dev/dri access for the Vulkan backend; Kind has no GPU
-            # device plugin, so the device is reached through a privileged
-            # hostPath mount.
-            privileged: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           startupProbe:
             httpGet:
               path: /health
@@ -70,18 +86,16 @@ spec:
               memory: 2Gi
             limits:
               memory: 12Gi
+              amd.com/gpu: 1
           volumeMounts:
             - name: models
               mountPath: /models
               readOnly: true
-            - name: dri
-              mountPath: /dev/dri
       volumes:
+        # The host directory that download-models.sh fills and bootstrap
+        # verifies, mounted read-only. MODELS_DIR comes from the homelab-host
+        # ConfigMap through Flux substitution.
         - name: models
           hostPath:
-            path: /models
-            type: Directory
-        - name: dri
-          hostPath:
-            path: /dev/dri
+            path: "${MODELS_DIR}"
             type: Directory

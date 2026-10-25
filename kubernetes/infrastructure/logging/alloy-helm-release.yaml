@@ -24,7 +24,8 @@ spec:
       retryInterval: 5m
   values:
     controller:
-      # Collect logs on every node, including the tainted control plane.
+      # Collect logs on every node, including a tainted control plane (the
+      # single k3s node carries no taint, but this keeps that true if it does).
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists

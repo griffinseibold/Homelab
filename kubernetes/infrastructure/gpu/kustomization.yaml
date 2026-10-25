@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# kube-system, as in AMD's manifest: system-node-critical pods belong there,
+# and lab mode never touches it.
+namespace: kube-system
+resources:
+  - device-plugin.yaml
+configMapGenerator:
+  # GPU utilization, VRAM, temperature and power from node-exporter's drm
+  # and hwmon collectors (enabled in the kube-prometheus-stack values).
+  - name: amd-gpu-dashboard
+    files:
+      - amd-gpu.json=dashboard.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"

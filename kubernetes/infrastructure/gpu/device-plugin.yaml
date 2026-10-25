@@ -1,0 +1,64 @@
+# AMD's Kubernetes device plugin advertises the host GPU as the extended
+# resource amd.com/gpu. A pod that requests `amd.com/gpu: 1` gets /dev/kfd
+# and that GPU's /dev/dri/card* and /dev/dri/renderD* nodes, and no other
+# pod can have it at the same time. https://github.com/ROCm/k8s-device-plugin
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: amdgpu-device-plugin
+  labels:
+    app.kubernetes.io/name: amdgpu-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: amdgpu-device-plugin
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: amdgpu-device-plugin
+    spec:
+      # As upstream: the kubelet must not evict the plugin under pressure, or
+      # GPU workloads lose their device.
+      priorityClassName: system-node-critical
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+      containers:
+        - name: amdgpu-device-plugin
+          image: rocm/k8s-device-plugin:1.31.0.11
+          # Privileged as in AMD's manifest: the plugin's health check opens
+          # /dev/kfd and reads the GPU topology. It holds no capabilities
+          # beyond that, and it is the only privileged GPU component; the
+          # workloads it serves are not privileged.
+          securityContext:
+            privileged: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            # The kubelet's device plugin registration socket directory.
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+            # GPU discovery reads /sys/class/kfd and /sys/class/drm.
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+      volumes:
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory

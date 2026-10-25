@@ -11,3 +11,7 @@ configMapGenerator:
   - name: llm-demand-script
     files:
       - controller.py
+    options:
+      annotations:
+        # Keep Flux's ${MODELS_DIR} substitution away from the script source.
+        kustomize.toolkit.fluxcd.io/substitute: disabled

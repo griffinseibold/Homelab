@@ -15,4 +15,11 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
+  # The lan listener's host address (envoy-proxy.yaml). Optional so a
+  # missing ConfigMap falls back to loopback instead of blocking the Gateway.
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: homelab-host
+        optional: true
 

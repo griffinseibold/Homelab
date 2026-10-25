@@ -1,3 +1,22 @@
+# How the Gateway is published on the host.
+#
+# Envoy's container gets two hostPorts, each bound to one host address:
+#   127.0.0.1:8080   -> listener http (port 80)
+#   LAN_ADDRESS:443  -> listener lan  (port 443), or 127.0.0.1:443 when
+#                       home-network access is off
+# The CNI portmap plugin turns a hostPort into DNAT rules that match only
+# that destination address, so nothing listens on 0.0.0.0, and an IPv4
+# hostIP creates no IPv6 rule. This replaces Kind's extraPortMappings.
+#
+# Alternatives considered: kube-proxy's nodeport-addresses applies to every
+# NodePort at once, so it cannot keep http on loopback while lan is on the
+# LAN address; host networking would have Envoy bind its listeners on every
+# address. A per-port hostIP is the only option that pins each listener to
+# its own address.
+#
+# LAN_ADDRESS is substituted by Flux from the flux-system/homelab-host
+# ConfigMap that scripts/bootstrap-dev.sh writes; it defaults to loopback.
+# tests/test_exposure.py checks this file.
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy
 metadata:
@@ -7,19 +26,38 @@ spec:
   provider:
     type: Kubernetes
     kubernetes:
+      # In-cluster access only; the hostPorts below are the way in from the
+      # host. ClusterIP opens no NodePort on any address.
       envoyService:
-        type: NodePort
-        externalTrafficPolicy: Cluster
+        type: ClusterIP
+      envoyDeployment:
+        replicas: 1
         patch:
           type: StrategicMerge
           value:
             spec:
-              ports:
-                - name: http-80
-                  port: 80
-                  protocol: TCP
-                  nodePort: 30080
-                - name: https-443
-                  port: 443
-                  protocol: TCP
-                  nodePort: 30443
+              # A replacement pod cannot start while the old one holds the
+              # hostPorts on the only node, so a rolling update would wait
+              # forever. Recreate briefly stops the Gateway instead.
+              strategy:
+                type: Recreate
+                rollingUpdate: null
+              template:
+                spec:
+                  containers:
+                    - name: envoy
+                      ports:
+                        # Envoy Gateway runs listeners on ports below 1024 at
+                        # port + 10000 inside the container (wellKnownPortShift
+                        # in v1.9.1), so it needs no privileges: listener 80
+                        # is container port 10080 and 443 is 10443.
+                        - name: host-http
+                          containerPort: 10080
+                          hostIP: 127.0.0.1
+                          hostPort: 8080
+                          protocol: TCP
+                        - name: host-lan
+                          containerPort: 10443
+                          hostIP: "${LAN_ADDRESS:=127.0.0.1}"
+                          hostPort: 443
+                          protocol: TCP
