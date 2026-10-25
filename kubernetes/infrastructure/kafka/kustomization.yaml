@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kafka
+resources:
+  - namespace.yaml
+  - kafka.yaml
+  - exporter.yaml
+  - service-monitor.yaml
+  - prometheus-rule.yaml
+configMapGenerator:
+  # These names get a content hash, so editing any of them rolls the broker.
+  - name: kafka-config
+    files:
+      - server.properties
+      - log4j2.yaml
+  - name: kafka-jmx-exporter
+    files:
+      - jmx-exporter.yaml
+  - name: kafka-fetch-jmx-agent
+    files:
+      - fetch-jmx-agent.py
+  - name: kafka-dashboard
+    files:
+      - kafka.json=dashboard.json
+    options:
+      # The Grafana sidecar watches data updates; keep one dashboard ConfigMap.
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"

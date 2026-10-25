@@ -1,0 +1,42 @@
+# Prometheus JMX exporter 1.6.0 rules for the broker. Only the MBeans the
+# dashboard and alerts use are queried and turned into metrics, which keeps
+# the scrape cheap and the series count small. Rule syntax:
+# https://github.com/prometheus/jmx_exporter/blob/1.6.0/website/versioned_docs/version-1.6.0/configuration/rules.md
+# MBean names: https://kafka.apache.org/43/operations/monitoring/
+#
+# The agent also exports the JVM's own metrics (jvm_memory_used_bytes and
+# friends) without any rule. Consumer group lag is not a broker MBean; the
+# kafka-exporter Deployment (exporter.yaml) provides it.
+lowercaseOutputName: true
+includeObjectNames:
+  - kafka.server:type=BrokerTopicMetrics,*
+  - kafka.server:type=ReplicaManager,*
+  - kafka.controller:type=KafkaController,*
+  - kafka.log:type=Log,name=Size,*
+rules:
+  # Bytes and messages per topic, as counters. Topic MBeans appear once a
+  # topic first sees traffic. The broker-wide variants without a topic are
+  # left out; summing the topics gives the same totals.
+  - pattern: kafka.server<type=BrokerTopicMetrics, name=(BytesIn|BytesOut|MessagesIn)PerSec, topic=(.+)><>Count
+    name: kafka_server_brokertopicmetrics_$1_total
+    type: COUNTER
+    labels:
+      topic: "$2"
+  # Partitions without their full set of replicas. One broker can only hold
+  # replication factor 1 (Kafka refuses to create a topic asking for more),
+  # so this stays zero; the dashboard shows it to make that visible.
+  - pattern: kafka.server<type=ReplicaManager, name=(UnderReplicatedPartitions|UnderMinIsrPartitionCount|PartitionCount|LeaderCount)><>Value
+    name: kafka_server_replicamanager_$1
+    type: GAUGE
+  # The KRaft controller in the same process.
+  - pattern: kafka.controller<type=KafkaController, name=(ActiveControllerCount|OfflinePartitionsCount|GlobalTopicCount|GlobalPartitionCount)><>Value
+    name: kafka_controller_kafkacontroller_$1
+    type: GAUGE
+  # Bytes on disk per partition, to compare against the retention limits in
+  # server.properties.
+  - pattern: kafka.log<type=Log, name=Size, topic=(.+), partition=(.+)><>Value
+    name: kafka_log_log_size
+    type: GAUGE
+    labels:
+      topic: "$1"
+      partition: "$2"

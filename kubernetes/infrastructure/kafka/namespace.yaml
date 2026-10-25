@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kafka
+  labels:
+    # Every pod here runs unprivileged as a fixed non-root user with no
+    # capabilities, so the API server can refuse anything weaker.
+    pod-security.kubernetes.io/enforce: restricted
+  # No gateway.homelab/access or gateway.homelab/lan label: Kafka speaks
+  # PLAINTEXT with no authentication, so it is reachable only inside the
+  # cluster, never through the Gateway or on the home network.

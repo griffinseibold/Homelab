@@ -1,0 +1,243 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/name: kafka
+spec:
+  # The cluster's default storage class, like Garage and MLflow, so
+  # scripts/backup-dev.py archives it with every other claim. One volume
+  # holds the KRaft metadata log, every topic's data and the cached JMX
+  # agent. The retention limits in server.properties are sized for it.
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+# The official apache/kafka image with plain manifests rather than the
+# Strimzi operator. One broker for one person needs a StatefulSet-sized
+# amount of configuration; Strimzi would add an operator Deployment, a dozen
+# CRDs, its own upgrade cadence and a second way to express every setting,
+# all to manage features (rolling multi-broker upgrades, TLS users, Cruise
+# Control) this lab does not use. The image is published by the Kafka project
+# itself: https://kafka.apache.org/community/downloads/
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/name: kafka
+spec:
+  # One broker owns one volume: Recreate keeps a second pod from opening the
+  # same log directories during an update.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka
+    spec:
+      automountServiceAccountToken: false
+      # The image turns every KAFKA_* environment variable into a broker
+      # setting. Kubernetes would otherwise inject KAFKA_PORT,
+      # KAFKA_SERVICE_HOST and friends for the Service named kafka, which
+      # would become nonsense settings.
+      enableServiceLinks: false
+      # A clean shutdown flushes logs and writes a clean-shutdown marker, so
+      # the next start skips log recovery.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        # The image's appuser. fsGroup makes the volume and scratch
+        # directories writable by it whatever their initial owner.
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: fetch-jmx-agent
+          # The same pinned image as the other in-cluster scripts.
+          image: python:3.13.16-alpine3.24
+          command: ["python3", "-I", "-u", "/app/fetch-jmx-agent.py"]
+          env:
+            # Prometheus JMX exporter 1.6.0, the current release:
+            # https://github.com/prometheus/jmx_exporter/releases/tag/1.6.0
+            # The project publishes the agent as a jar, not an image. The
+            # hash is the release's own .sha256 asset, and the download is
+            # rejected unless it matches.
+            - name: AGENT_URL
+              value: https://github.com/prometheus/jmx_exporter/releases/download/1.6.0/jmx_prometheus_javaagent-1.6.0.jar
+            - name: AGENT_SHA256
+              value: a95983fd96e865d2bcdf911cc500e7c82808c27ab9fd226bf96732b6c3d8c46e
+            - name: AGENT_PATH
+              value: /var/lib/kafka/data/jmx-agent/jmx_prometheus_javaagent-1.6.0.jar
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 96Mi
+          volumeMounts:
+            - name: fetch-script
+              mountPath: /app
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/kafka/data
+      containers:
+        - name: kafka
+          # The newest release on Kafka's downloads page when this was
+          # written (4.3.1, June 2026). 4.3.2 and 4.4.0 are tagged in Git but
+          # not yet announced there. Keep the exporter's --kafka.version
+          # (exporter.yaml) equal to this version.
+          image: apache/kafka:4.3.1
+          # The image's own entrypoint (/etc/kafka/docker/run) copies
+          # /mnt/shared/config/server.properties into place, formats the
+          # volume on the first start and starts the broker. The variables
+          # below are set only for that process, not for the container:
+          # tools started with `kubectl exec` (kafka-topics.sh and friends)
+          # read the same names, and would otherwise try to start a second
+          # JMX agent on the same port and get a 1 GiB heap.
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -eu
+              mkdir -p /var/lib/kafka/data/logs
+              export KAFKA_HEAP_OPTS="-Xms512m -Xmx1g"
+              export KAFKA_OPTS="-javaagent:${AGENT_PATH}=9404:/etc/kafka/jmx/jmx-exporter.yaml"
+              exec /etc/kafka/docker/run
+          env:
+            # The KRaft cluster ID written into the volume on its first
+            # start (a base64 UUID, from kafka-storage.sh random-uuid). Never
+            # change it: the broker refuses a volume formatted with another.
+            # It is an identifier, not a secret.
+            - name: CLUSTER_ID
+              value: b7soKMPBSrKCiUFfCkF8Ng
+            - name: AGENT_PATH
+              value: /var/lib/kafka/data/jmx-agent/jmx_prometheus_javaagent-1.6.0.jar
+            # Without -loggc the start script writes no GC log files; the JVM
+            # still prints warnings to the pod log.
+            - name: EXTRA_ARGS
+              value: -name kafkaServer
+            # The start script's scratch directory; the default is under the
+            # read-only installation directory.
+            - name: LOG_DIR
+              value: /tmp/kafka-logs
+          ports:
+            - name: kafka
+              containerPort: 9092
+            - name: metrics
+              containerPort: 9404
+          # The client listener opens once the broker has loaded its metadata
+          # and can serve requests. The first start also formats the volume.
+          startupProbe:
+            tcpSocket:
+              port: kafka
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            tcpSocket:
+              port: kafka
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: kafka
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            # Heap 1 GiB plus metaspace, thread stacks and network buffers.
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            # Read by the entrypoint: server.properties and log4j2.yaml.
+            - name: config
+              mountPath: /mnt/shared/config
+              readOnly: true
+            - name: jmx-config
+              mountPath: /etc/kafka/jmx
+              readOnly: true
+            # Exactly the image's VOLUME path. containerd gives any image
+            # VOLUME without a Kubernetes mount at that exact path its own
+            # throwaway directory, which would hide a volume mounted above it.
+            - name: data
+              mountPath: /var/lib/kafka/data
+            # The entrypoint writes the final configuration here, so it must
+            # be writable while the root filesystem is not.
+            - name: final-config
+              mountPath: /opt/kafka/config
+            # JVM performance data and the start script's scratch directory.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # Generated with content hashes, so a configuration change rolls the
+        # broker.
+        - name: config
+          configMap:
+            name: kafka-config
+        - name: jmx-config
+          configMap:
+            name: kafka-jmx-exporter
+        - name: fetch-script
+          configMap:
+            name: kafka-fetch-jmx-agent
+        - name: data
+          persistentVolumeClaim:
+            claimName: kafka
+        - name: final-config
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+---
+# The contract endpoint for applications:
+# kafka.kafka.svc.cluster.local:9092, PLAINTEXT, inside the cluster only.
+# server.properties advertises exactly this name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/name: kafka
+spec:
+  selector:
+    app.kubernetes.io/name: kafka
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka
+---
+# The JMX exporter's /metrics, for Prometheus only. A separate Service keeps
+# the client endpoint above to the Kafka protocol alone.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-metrics
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: metrics
+spec:
+  selector:
+    app.kubernetes.io/name: kafka
+  ports:
+    - name: metrics
+      port: 9404
+      targetPort: metrics
