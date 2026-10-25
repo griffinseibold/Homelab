@@ -36,7 +36,7 @@ class BackupTests(unittest.TestCase):
         self.volume = {"namespace": "chat", "claim": "open-webui", "node": "host",
                        "path": "/var/lib/rancher/k3s/storage/pvc-test_chat_open-webui",
                        "capacity": "2Gi", "archive": "chat.tar"}
-        self.cgroups = [Path("/sys/fs/cgroup/kubepods.slice"), Path("/sys/fs/cgroup/system.slice/k3s.service")]
+        self.cgroups = [Path("/sys/fs/cgroup/system.slice/k3s.service"), Path("/sys/fs/cgroup/kubepods.slice")]
 
     def snapshot(self):
         def archive(_volume, destination):
@@ -232,7 +232,7 @@ class BackupTests(unittest.TestCase):
 
     def test_freezer_finds_pod_and_k3s_cgroups_or_refuses(self):
         root = self.frozen_tree()
-        self.assertEqual(backup.freezer_cgroups(root), [root / "kubepods.slice", root / "system.slice/k3s.service"])
+        self.assertEqual(backup.freezer_cgroups(root), [root / "system.slice/k3s.service", root / "kubepods.slice"])
         (root / "system.slice/k3s.service/cgroup.freeze").unlink()
         with self.assertRaisesRegex(ValueError, "cgroups to freeze"):
             backup.freezer_cgroups(root)
@@ -247,7 +247,7 @@ class BackupTests(unittest.TestCase):
     def test_pause_failure_resumes_everything_it_may_have_frozen(self):
         root = self.frozen_tree()
         cgroups = backup.freezer_cgroups(root)
-        calls, set_frozen = self.fake_freezer(fail_on=("k3s.service", True))
+        calls, set_frozen = self.fake_freezer(fail_on=("kubepods.slice", True))
         with patch.object(backup, "set_frozen", side_effect=set_frozen):
             with self.assertRaises(subprocess.CalledProcessError):
                 with backup.paused(cgroups):
@@ -265,8 +265,9 @@ class BackupTests(unittest.TestCase):
                 with backup.paused(cgroups):
                     self.assertTrue(all(backup.is_frozen(c) for c in cgroups))
                     raise KeyboardInterrupt()
-        # Pods resume after k3s, in reverse order of freezing.
-        self.assertEqual(calls[-2:], [("k3s.service", False), ("kubepods.slice", False)])
+        # Pods resume before k3s, so the kubelet never sees frozen pods.
+        self.assertEqual(calls, [("k3s.service", True), ("kubepods.slice", True),
+                                 ("kubepods.slice", False), ("k3s.service", False)])
         self.assertTrue(all(not backup.is_frozen(c) for c in cgroups))
 
     def test_failed_resume_names_the_command_to_run(self):

@@ -68,13 +68,17 @@ def nodes():
 
 
 def freezer_cgroups(root=CGROUP_ROOT):
-    """The cgroups to freeze: the pods' parent cgroup, then k3s itself."""
+    """The cgroups to freeze, in order: k3s itself, then the pods' parent cgroup.
+
+    k3s (with the kubelet) is frozen first and thawed last, so the kubelet
+    never runs while pods are frozen and cannot fail their probes.
+    """
     pods = [root / name for name in POD_CGROUPS if (root / name / "cgroup.freeze").exists()]
     k3s = root / K3S_CGROUP
     if len(pods) != 1 or not (k3s / "cgroup.freeze").exists():
         raise ValueError("Could not find the k3s pod and service cgroups to freeze "
                          f"(cgroup v2 with {' or '.join(POD_CGROUPS)} and {K3S_CGROUP})")
-    return [pods[0], k3s]
+    return [k3s, pods[0]]
 
 
 def privileged(*args, **kwargs):
