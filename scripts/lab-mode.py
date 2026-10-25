@@ -26,7 +26,7 @@ SAVED_REPLICAS = "homelab.local/saved-replicas"
 FIELD_MANAGER = "homelab-lab-mode"
 WORKLOADS = "deployments.apps,statefulsets.apps"
 # Applications are only ever stopped in their own destination namespaces.
-# These hold the platform itself (and Kind's system pieces); an Application
+# These hold the platform itself (and k3s's system pieces); an Application
 # that targets one of them is skipped with a warning instead.
 # ml-storage and mlflow are platform services that applications (and the
 # person using llm mode) keep relying on; stopping them would only lose

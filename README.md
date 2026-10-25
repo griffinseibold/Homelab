@@ -6,7 +6,7 @@ machine-learning work. Ansible configures the host; Flux manages
 the platform; Argo CD deploys applications from their own repositories.
 
 ```text
-Ubuntu → Docker → Kind: homelab-dev (one control plane, two workers)
+Ubuntu → k3s: homelab-dev (single node, the host's AMD GPU via AMD's device plugin)
                     ├─ Flux + Envoy Gateway → localhost:8080, optional home-network HTTPS
                     ├─ cert-manager → *.lab.internal from a host-kept root CA
                     ├─ Prometheus, Grafana, Loki and Alloy
@@ -23,45 +23,48 @@ stops five minutes after the last one goes away. **LLM mode** stops every
 application and runs only the LLM and the Open WebUI chat, for personal use.
 
 The current host has a Ryzen 9 3900X, 48 GB RAM, and a Radeon RX 6900 XT
-with 16 GB VRAM. This is a single-host development environment. The GPU server
-uses privileged device access; the unauthenticated inference API and HTTP UIs
-are exposed through a Gateway bound to host loopback. Chat and Grafana can also
+with 16 GB VRAM. This is a single-host development environment. Pods get the
+GPU by requesting `amd.com/gpu: 1`, so the LLM and GPU jobs take turns
+through the scheduler; none of them run privileged. The unauthenticated
+inference API and HTTP UIs are exposed through a Gateway bound to host
+loopback; k3s's own API server and kubelet ports are firewalled from the
+network. Chat and Grafana can also
 be opted in to HTTPS on the home network; nothing is published to the internet.
 
 ## Start here
 
-On Ubuntu with an available Vulkan-capable GPU and `/dev/dri/renderD*` device:
+On Ubuntu with an AMD GPU on the in-kernel `amdgpu` driver (`/dev/kfd` and a
+`/dev/dri/renderD*` device):
 
 ```bash
 sudo apt update && sudo apt install -y git
 git clone https://github.com/griffinseibold/Homelab.git
 cd Homelab
 ./scripts/bootstrap-host.sh
-# Log out and back in if Docker group membership changed.
 ./scripts/download-models.sh
 ./scripts/bootstrap-dev.sh
 ```
 
-The host script prompts for sudo and installs Docker, kubectl, Helm, Kind,
-Flux, and the GitHub CLI. Models require several GB of download and disk space.
+The host script prompts for sudo and installs a pinned k3s, kubectl, Helm,
+Flux, and the GitHub CLI, and checks the GPU. It adds the `homelab-dev`
+context to `~/.kube/config`. Models require several GB of download and disk space.
 To put weights elsewhere, set `export MODELS_DIR=/absolute/path/to/models`
 before **both** model download and dev bootstrap. The default is `~/models`.
 
-Dev bootstrap verifies model checksums, GPU access prerequisites, and existing
-worker mounts before configuring the cluster. It reuses compatible clusters
-and never deletes one. It waits for the LLM demand controller rather than the
-LLM itself, and checks the LLM and chat endpoints only in llm mode, because in
-apps mode they are stopped until needed. `kubernetes/kind/dev.yaml` is a
-template rendered by this script; do not pass it directly to `kind create cluster`.
+Dev bootstrap verifies model checksums and GPU devices, installs Flux, and
+records host values the manifests need (model directory, GPU groups, LAN
+address) in the `flux-system/homelab-host` ConfigMap. It is safe to rerun. It
+waits for the GPU to be advertised and for the LLM demand controller rather
+than the LLM itself, and checks the LLM and chat endpoints only in llm mode,
+because in apps mode they are stopped until needed.
+
+**Coming from the Kind cluster?** Follow [the migration guide](docs/migrate-to-k3s.md);
+it moves all data through a verified backup.
 
 Flux reconciles the public repository configured in
 [`gotk-sync.yaml`](kubernetes/clusters/dev/flux-system/gotk-sync.yaml), without
 GitHub credentials. Local edits are not deployed until committed and pushed
 to that configured source. When using a fork, update the source URL first.
-
-For an existing cluster upgrading to the worker placement labels in this
-revision, run the new `bootstrap-dev.sh` before pushing the LLM manifests.
-It checks the mounts and labels compatible workers so the server can schedule.
 
 When the S3 storage and MLflow first reach an existing cluster, rerun
 `bootstrap-dev.sh` after pushing: it generates and loads Garage's secrets and
@@ -100,27 +103,26 @@ use S3 at `http://s3.ml-storage.svc.cluster.local:9000` and MLflow at
 ./scripts/lab-mode.py apps                 # Back to apps (the default)
 ./scripts/download-models.sh --check       # Verify weights without downloading
 ./scripts/ml-credentials.py crosswalk      # S3 credentials Secret for a namespace
-flux get kustomizations --context kind-homelab-dev
-kubectl --context kind-homelab-dev get pods,pvc -A
-./scripts/backup-dev.py create             # Pauses dev nodes while copying PVCs
+flux get kustomizations --context homelab-dev
+kubectl --context homelab-dev get pods,pvc -A
+./scripts/backup-dev.py create             # Freezes the cluster while copying PVCs
 ```
 
 Backups go to `~/homelab-backups` by default. Read the
-[recovery guide](docs/recovery.md) before a cluster rebuild: ordinary PVC data
-lives inside Kind nodes and is lost when the cluster is deleted. Host model
-weights and host-side backups survive cluster deletion.
+[recovery guide](docs/recovery.md) before a cluster rebuild: PVC data lives in
+`/var/lib/rancher/k3s/storage/` and is deleted with its claim or by
+uninstalling k3s. Host model weights and host-side backups survive.
 
 ## Where things live
 
 | Path | Purpose |
 | --- | --- |
-| `ansible/` | Ubuntu host configuration and tool installation |
+| `ansible/` | Ubuntu host configuration, k3s and GPU checks |
 | `scripts/` | Bootstrap, model download, lab mode switch, S3 credentials, backup and recovery |
 | `kubernetes/clusters/dev/` | Flux reconciliation and dependency ordering |
-| `kubernetes/infrastructure/` | Gateway, cert-manager, monitoring, logging, Argo CD, LLM, chat, S3 storage and MLflow |
-| `kubernetes/kind/` | Dev template and an unused `homelab-lab` configuration |
-| `tests/` | Bootstrap, recovery, LLM demand, lab mode, S3 setup and credential regressions |
-| `docs/` | Operations and recovery guides |
+| `kubernetes/infrastructure/` | Gateway, cert-manager, monitoring, logging, Argo CD, GPU device plugin, LLM, chat, S3 storage and MLflow |
+| `tests/` | Bootstrap, exposure, recovery, LLM demand, lab mode, S3 setup and credential regressions |
+| `docs/` | Operations, recovery and Kind-to-k3s migration guides |
 
 Applications stay in their own repositories; register them through Argo CD.
 The reference application is
@@ -144,6 +146,9 @@ adds three capabilities:
    it, and an LLM mode pauses every application for personal chat.
 4. **ML platform:** S3-compatible object storage (Garage) and an MLflow
    tracking server for GPU training and inference projects.
+5. **k3s with a real GPU resource:** a single-node k3s cluster replaces Kind,
+   so AMD's device plugin schedules the GPU (`amd.com/gpu`) and GPU metrics
+   come from the host.
 
 The next operational gaps are off-host encrypted backups, an external alert
 receiver, and managed secrets. Public access would also require authentication

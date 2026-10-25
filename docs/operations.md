@@ -1,15 +1,15 @@
 # Operations
 
-All cluster commands below explicitly target `kind-homelab-dev`.
+All cluster commands below explicitly target `homelab-dev`.
 
 ## Logins and endpoints
 
 Read generated credentials locally:
 
 ```bash
-kubectl --context kind-homelab-dev -n argocd get secret argocd-initial-admin-secret \
+kubectl --context homelab-dev -n argocd get secret argocd-initial-admin-secret \
   -o go-template='{{ index .data "password" | base64decode }}{{ "\n" }}'
-kubectl --context kind-homelab-dev -n monitoring get secret kube-prometheus-stack-grafana \
+kubectl --context homelab-dev -n monitoring get secret kube-prometheus-stack-grafana \
   -o go-template='user: {{ index .data "admin-user" | base64decode }}{{ "\n" }}password: {{ index .data "admin-password" | base64decode }}{{ "\n" }}'
 ```
 
@@ -28,10 +28,41 @@ curl --noproxy '*' --fail http://llm.localhost:8080/v1/chat/completions \
 ```
 
 The server uses Qwen3-8B Q4_K_M with an 8,192-token context and at most one
-replica.
-It schedules on workers labeled `homelab.local/llm-capable=true`, where the
-bootstrap has checked read-only model mounts and `/dev/dri` device mounts.
-Both workers share the same physical GPU; they do not provide two GPUs.
+replica. It requests the GPU as `amd.com/gpu: 1` and reads the weights
+read-only from `MODELS_DIR` on the host, running as that directory's owner.
+
+## The GPU
+
+AMD's Kubernetes device plugin (`kube-system/amdgpu-device-plugin`)
+advertises the host's one GPU as `amd.com/gpu: 1`. A pod that requests it
+gets `/dev/kfd` and the GPU's `/dev/dri` card and render nodes, without
+privileged mode; that is enough for Vulkan (the LLM) and ROCm (PyTorch). Only
+one pod holds the GPU at a time. Another pod requesting it waits as
+`Pending` (`Insufficient amd.com/gpu`) until the holder stops, so a training
+job and the LLM take turns: in apps mode the LLM is stopped unless an
+application requests it, and `./scripts/lab-mode.py status` shows who does.
+A GPU workload's pod should also add the host's `render` and `video` group
+IDs as `supplementalGroups` so it can open the device nodes; read them with
+`kubectl --context homelab-dev -n flux-system get configmap homelab-host -o yaml`
+(`RENDER_GID`, `VIDEO_GID`).
+
+```yaml
+resources:
+  limits:
+    amd.com/gpu: 1
+```
+
+Check what the node offers and who holds it:
+
+```bash
+kubectl --context homelab-dev get nodes -o jsonpath='{.items[0].status.allocatable.amd\.com/gpu}{"\n"}'
+kubectl --context homelab-dev -n kube-system logs daemonset/amdgpu-device-plugin --tail=20
+```
+
+The host only needs the kernel's `amdgpu` driver; `bootstrap-host.sh`
+checks it and installs no ROCm packages. Containers bring their own ROCm or
+Vulkan user space. The [AMD GPU dashboard](http://grafana.localhost:8080/d/homelab-amd-gpu)
+shows utilization, VRAM, temperature, power and whether a pod holds the GPU.
 
 ## LLM on demand and LLM mode
 
@@ -113,7 +144,7 @@ install less than three minutes old is not stopped, so its volume can bind
 and Flux can finish the install. Every change is logged with its reason:
 
 ```bash
-kubectl --context kind-homelab-dev -n llm logs deployment/llm-demand --tail=50
+kubectl --context homelab-dev -n llm logs deployment/llm-demand --tail=50
 ```
 
 The controller only polls the Kubernetes API and resizes through the `scale`
@@ -138,7 +169,7 @@ Its metrics (`llm_demand_mode`, `llm_demand_requests`,
 | Chat is not reachable | The chat runs only in llm mode: `./scripts/lab-mode.py llm --wait` |
 | Applications are still stopped after `apps` | Rerun `./scripts/lab-mode.py apps`; `status` lists anything still paused |
 | An application restarts during llm mode | An ApplicationSet or parent app turned its sync back on. `status` warns about it; rerun `./scripts/lab-mode.py llm` or pause the parent |
-| Mode changes do nothing | `kubectl --context kind-homelab-dev -n llm get deployment llm-demand` and its logs; the controller does the LLM and chat scaling |
+| Mode changes do nothing | `kubectl --context homelab-dev -n llm get deployment llm-demand` and its logs; the controller does the LLM and chat scaling |
 
 ## ML storage and experiment tracking
 
@@ -182,7 +213,7 @@ s3 = boto3.client("s3", endpoint_url="http://s3.ml-storage.svc.cluster.local:900
 
 The credentials live in Garage's own database and in the Secret, never in
 Git. To revoke one, delete the key inside the Garage pod
-(`kubectl --context kind-homelab-dev -n ml-storage exec deploy/garage -- /garage key delete --yes k8s-crosswalk`)
+(`kubectl --context homelab-dev -n ml-storage exec deploy/garage -- /garage key delete --yes k8s-crosswalk`)
 and the Secret.
 
 ### MLflow
@@ -218,8 +249,8 @@ expect, rather than guessing.
 | Symptom | Next check |
 | --- | --- |
 | `ml-storage` Kustomization not ready; Garage pod `CreateContainerConfigError` | Secret `ml-storage/garage` is missing: rerun `./scripts/bootstrap-dev.sh` |
-| `garage-setup` Job failed | `kubectl --context kind-homelab-dev -n ml-storage logs job/garage-setup`. A rejected token means the Secret changed after Garage started: `kubectl ... -n ml-storage rollout restart deployment/garage`, then delete the Job so Flux recreates it |
-| Setup waits for "no storage node in the layout" | `kubectl --context kind-homelab-dev -n ml-storage exec deploy/garage -- /garage status` and the Garage log |
+| `garage-setup` Job failed | `kubectl --context homelab-dev -n ml-storage logs job/garage-setup`. A rejected token means the Secret changed after Garage started: `kubectl ... -n ml-storage rollout restart deployment/garage`, then delete the Job so Flux recreates it |
+| Setup waits for "no storage node in the layout" | `kubectl --context homelab-dev -n ml-storage exec deploy/garage -- /garage status` and the Garage log |
 | MLflow pod `CreateContainerConfigError` | Secret `mlflow/s3-credentials` is missing: `./scripts/ml-credentials.py mlflow --bucket mlflow-artifacts` |
 | MLflow answers 403 Invalid Host header | Use `mlflow.localhost:8080` or the Service name with port 5000; see `--allowed-hosts` |
 | Artifact upload fails | MLflow log; `./scripts/ml-credentials.py mlflow --bucket mlflow-artifacts` restores its key's permissions |
@@ -228,14 +259,18 @@ expect, rather than guessing.
 ## Home network access
 
 Phones and laptops on your Wi-Fi can use chat, Grafana and opted-in
-applications over HTTPS, for example `https://chat.lab.internal`. The LLM API
-and Argo CD are never offered on the home network. Access is off unless the
-cluster was created with `LAN_ADDRESS`, and it is never published to the
-internet:
+applications over HTTPS, for example `https://chat.lab.internal`. The LLM API,
+Argo CD and MLflow are never offered on the home network. Access is off unless
+bootstrap was given `LAN_ADDRESS`, and it is never published to the internet:
 
-- Kind publishes the Gateway's `lan` listener on port 443 of one private IPv4
-  address, `LAN_ADDRESS`. It is not published on `0.0.0.0` or on the host's
-  public IPv6 address.
+- The Envoy pod's `lan` hostPort is bound to port 443 of one private IPv4
+  address, `LAN_ADDRESS` (127.0.0.1 when access is off). The `http` listener's
+  hostPort is bound to 127.0.0.1:8080. Neither is published on `0.0.0.0` or on
+  the host's IPv6 addresses; see
+  [`envoy-proxy.yaml`](../kubernetes/infrastructure/gateway-api/overlays/dev/envoy-proxy.yaml).
+- k3s's API server, kubelet and other control ports listen on every address,
+  so a firewall table (`homelab_guard`, installed by `bootstrap-host.sh`) drops
+  connections to them from outside the host and its pods.
 - Only namespaces labeled `gateway.homelab/lan: "true"` can attach routes to
   the listener. Other routes return 404 there, even with a forged `Host` header.
 - Certificates come from your own root certificate authority. Its name
@@ -251,24 +286,19 @@ internet:
 2. **Add router DNS entries** for each name, such as `chat.lab.internal` and
    `grafana.lab.internal`, pointing to that address. Devices must use the router
    for DNS; a VPN or a custom Private DNS setting on a phone bypasses it.
-3. **Apply the host configuration** with `./scripts/bootstrap-host.sh`. It sets
-   `net.ipv4.ip_nonlocal_bind`, so Docker can publish the address at boot even
-   if DHCP assigns it moments later. Without that setting, the control-plane
-   node can fail to start after a reboot.
-4. **Create the cluster with the address.** Kind fixes port mappings when a
-   cluster is created, so an existing cluster must be backed up, deleted and
-   restored ([recovery](recovery.md)):
+3. **Run bootstrap with the address:**
 
    ```bash
-   ./scripts/backup-dev.py create
-   kind delete cluster --name homelab-dev
    LAN_ADDRESS=192.168.1.50 ./scripts/bootstrap-dev.sh   # this host's address
    ```
 
-   Later runs reuse the address the cluster was created with, so `LAN_ADDRESS`
-   can be omitted. A different address stops bootstrap without changing the
-   cluster.
-5. **Trust the root certificate on each device.** The first bootstrap creates
+   Bootstrap stores it in the `flux-system/homelab-host` ConfigMap and Flux
+   moves the Gateway's hostPort to it; the Gateway restarts briefly. Later
+   runs keep the stored address, so `LAN_ADDRESS` can be omitted. To change it,
+   rerun with the new address; to turn access off, rerun with
+   `LAN_ADDRESS=off`. If the host loses the stored address, bootstrap stops
+   and says so.
+4. **Trust the root certificate on each device.** The first bootstrap creates
    it in `~/.config/homelab/lab-ca/` (or `LAB_CA_DIR`). Copy only `ca.crt` to
    the device, by email or a cloud drive for example. **Never copy `ca.key`.**
    - iPhone: open `ca.crt` and allow the profile download. Then go to Settings
@@ -278,7 +308,7 @@ internet:
    - Android: Settings > Security > Encryption & credentials > Install a
      certificate > CA certificate, then choose `ca.crt`. Menu names vary by
      manufacturer. Browsers trust it; many other apps ignore user certificates.
-6. **Open the site with its scheme** the first time, for example
+5. **Open the site with its scheme** the first time, for example
    `https://chat.lab.internal`. Browsers treat an unfamiliar ending such as
    `.internal` as a search unless `https://` is typed. Bookmark it afterwards.
 
@@ -312,16 +342,16 @@ application, so prefer applications that have their own login.
 To withdraw one application, remove its namespace label and `lan` parent
 reference. To close the listener for everything, delete the `lan` listener
 from [`gateway.yaml`](../kubernetes/infrastructure/gateway-api/overlays/dev/gateway.yaml)
-and push; Flux removes it within its sync interval. The port mapping itself
-stays until the cluster is recreated without `LAN_ADDRESS`.
+and push; Flux removes it within its sync interval. To stop publishing port
+443 on the LAN address at all, rerun `LAN_ADDRESS=off ./scripts/bootstrap-dev.sh`.
 
 | Symptom | Next check |
 | --- | --- |
 | Name does not resolve on the phone | The router DNS entry; Wi-Fi rather than mobile data; no VPN or custom Private DNS |
-| Connection refused or times out | `docker port homelab-dev-control-plane 30443/tcp` shows the LAN address; the host still has that address |
-| Cluster down after a reboot; Docker logs `cannot assign requested address` | Run `./scripts/bootstrap-host.sh`, then `docker start homelab-dev-control-plane`. If the address changed, restore the DHCP reservation |
+| Connection refused or times out | `kubectl --context homelab-dev -n flux-system get configmap homelab-host -o jsonpath='{.data.LAN_ADDRESS}'` shows the address; the host still has it (`ip -4 address`); `sudo iptables -t nat -S \| grep 'dport 443'` shows a rule for it |
+| Address changed after a reboot | Restore the DHCP reservation, or rerun bootstrap with `LAN_ADDRESS` set to the new address and update the router DNS entries |
 | Certificate warning | The device trusts `ca.crt` (iPhone also needs full trust enabled) |
-| 404 on the home network only | The namespace label and `lan` parent reference; `kubectl --context kind-homelab-dev get httproutes -A` |
+| 404 on the home network only | The namespace label and `lan` parent reference; `kubectl --context homelab-dev get httproutes -A` |
 | `lab-ca` Flux Kustomization not ready | Rerun bootstrap so it loads the root into `cert-manager/lab-ca` |
 
 ## Applications
@@ -368,20 +398,24 @@ describes what each measurement means.
 
 Prometheus retains seven days on a 5 Gi PVC. Loki retains seven days on a
 10 Gi PVC; Grafana's database uses 1 Gi and Open WebUI uses 2 Gi. Garage's
-object storage uses 50 Gi and MLflow's database 2 Gi. The `standard`
-local-path storage class persists through pod restarts, but its data is inside
-Kind nodes. [Back up before deleting the cluster](recovery.md).
+object storage uses 50 Gi and MLflow's database 2 Gi. The `local-path`
+storage class (k3s's default) keeps volumes in
+`/var/lib/rancher/k3s/storage/` on the host; they persist through pod and
+host restarts but are deleted with their claim or by uninstalling k3s. A
+`standard` class (Kind's old name) is kept as an alias for application
+charts written for Kind. [Back up before rebuilding the cluster](recovery.md).
 
 In Grafana Explore, select Loki and try `{namespace="hello-crud"}` or
 `{namespace="llm"} |= "error"`. Alloy collects pod logs on every node.
 Prometheus discovers ServiceMonitors and PodMonitors across namespaces.
 Custom PrometheusRules need `release: kube-prometheus-stack` to match its
-rule selector. Unreachable Kind control-plane scrape targets are disabled.
+rule selector. k3s's embedded controller-manager, scheduler and proxy
+scrape targets are disabled because they bind to localhost.
 
 To open Prometheus:
 
 ```bash
-kubectl --context kind-homelab-dev -n monitoring port-forward \
+kubectl --context homelab-dev -n monitoring port-forward \
   service/kube-prometheus-stack-prometheus 9090:9090
 ```
 
@@ -390,56 +424,54 @@ Visit <http://localhost:9090>; keep the command running while using it.
 ## Troubleshooting
 
 ```bash
-flux get kustomizations --context kind-homelab-dev
-flux get helmreleases -A --context kind-homelab-dev
-kubectl --context kind-homelab-dev get pods,pvc -A
-kubectl --context kind-homelab-dev get gateways,httproutes -A
-kubectl --context kind-homelab-dev get events -A --sort-by=.lastTimestamp
-kubectl --context kind-homelab-dev -n llm logs deployment/llama-server --tail=100
-kubectl --context kind-homelab-dev -n llm logs deployment/llm-demand --tail=50
+flux get kustomizations --context homelab-dev
+flux get helmreleases -A --context homelab-dev
+kubectl --context homelab-dev get pods,pvc -A
+kubectl --context homelab-dev get gateways,httproutes -A
+kubectl --context homelab-dev get events -A --sort-by=.lastTimestamp
+kubectl --context homelab-dev -n llm logs deployment/llama-server --tail=100
+kubectl --context homelab-dev -n llm logs deployment/llm-demand --tail=50
 ./scripts/lab-mode.py status
 ```
 
 | Symptom | Next check |
 | --- | --- |
-| Docker permission denied | Log out/in after host bootstrap; check `docker info` |
+| `homelab-dev` context missing or cluster not answering | Rerun `./scripts/bootstrap-host.sh`; `systemctl status k3s`; `sudo journalctl -u k3s --since '10 min ago'` |
 | Missing or corrupt model | Run `download-models.sh` with the same `MODELS_DIR`, then `--check` |
 | Interrupted download | Rerun; valid partials resume. A corrupt completed partial is removed, requiring a fresh retry |
 | Existing mount mismatch | Use the original model directory, or back up before an intentional rebuild; mounts cannot change in place |
 | LLM has no pod | Usually expected: it runs only in llm mode or while an application requests it. Check `./scripts/lab-mode.py status` |
-| LLM Pending | Check worker labels, host mounts, memory, and the monitoring dependency |
-| LLM startup failure | Check Vulkan render device and model permissions; inspect startup logs |
+| LLM Pending | `kubectl --context homelab-dev -n llm describe pod -l app.kubernetes.io/name=llama-server`: `Insufficient amd.com/gpu` means another pod holds the GPU or the device plugin is not running; see [the GPU](#the-gpu) |
+| LLM startup failure | Startup logs; the render and video group IDs and model owner in the `homelab-host` ConfigMap match the host (rerun bootstrap after changes) |
 | GatewayClass not accepted | Bootstrap retries after one Envoy controller restart for the known first-install race |
-| Data missing after rebuild | Restore from a verified backup; deleting Kind deletes its local PVC storage |
+| Data missing after rebuild | Restore from a verified backup; uninstalling k3s or deleting a claim deletes its volume |
 
-Older clusters may lack the loopback port mapping. Bootstrap probes their
-control-plane address instead. Inspect it with:
+The Gateway is reachable only on 127.0.0.1:8080 (and LAN_ADDRESS:443). If
+those stop answering, check the Envoy pod is running and holds its hostPorts:
 
 ```bash
-kubectl --context kind-homelab-dev get node homelab-dev-control-plane \
-  -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'
+kubectl --context homelab-dev -n envoy-gateway-system get pods -o wide
+sudo iptables -t nat -S | grep -E 'dport (8080|443)'
 ```
 
-Use `http://NODE_IP:30080` with the intended hostname in the HTTP `Host` header.
-For example, `curl --noproxy '*' -H 'Host: llm.localhost' http://NODE_IP:30080/health`
-(the LLM answers only while it is running).
-The normal `.localhost:8080` UI links require the current mapping.
+A pod stuck Pending with "didn't have free ports" means another process
+(often an old Kind container) holds the port.
 
 ## Tests
 
-Bootstrap, recovery, LLM demand controller, lab mode, Garage setup and S3
-credential regressions run with:
+Bootstrap, exposure, recovery, LLM demand controller, lab mode, Garage setup
+and S3 credential regressions run with:
 
 ```bash
 python3 -m unittest discover -s tests
 ```
 
-For a real archive/restore round trip using synthetic SQLite data and a single
-disposable Docker container (no Kind access):
+For a real archive/restore round trip using synthetic SQLite data in a
+temporary directory (root tar, as backups use; no cluster access, nothing is
+frozen):
 
 ```bash
-RUN_DOCKER_TESTS=1 python3 -m unittest discover -s tests -p test_backup_docker.py -v
+RUN_ROOT_TESTS=1 python3 -m unittest discover -s tests -p test_backup_local.py -v
 ```
 
-This opt-in test may download `busybox:1.37.0`; it removes its test container
-and temporary data afterward.
+It needs root or passwordless sudo and removes its temporary data afterward.

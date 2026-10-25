@@ -1,7 +1,8 @@
 # Backup and recovery
 
-Kind's `standard` PVCs live inside node containers. Deleting the cluster deletes
-those volumes. Models in `MODELS_DIR` are host-mounted and survive; metrics,
+k3s keeps PVC data in `/var/lib/rancher/k3s/storage/` on the host. Deleting a
+claim deletes its volume, and uninstalling k3s (`k3s-uninstall.sh`) deletes
+them all. Models in `MODELS_DIR` are outside the cluster and survive; metrics,
 logs, dashboards, chat history, application databases, S3 objects (datasets,
 checkpoints, MLflow artifacts) and MLflow's tracking database need their own
 copy. The backup includes every bound PVC, so Garage's `ml-storage/garage`
@@ -10,7 +11,7 @@ volume can hold up to 50 Gi; allow for it on the backup disk.
 
 ## Create and verify a backup
 
-Run from the host with Python 3, Docker, Kind, and kubectl available:
+Run from the host as your normal user, with Python 3, kubectl and sudo:
 
 ```bash
 ./scripts/backup-dev.py create
@@ -21,11 +22,15 @@ Run from the host with Python 3, Docker, Kind, and kubectl available:
 
 The default destination is a new timestamped directory in `~/homelab-backups`.
 Allow host disk space for the actual contents of all PVCs; archives are
-uncompressed. **The entire dev cluster is paused during copying**, so choose a
-maintenance window and avoid concurrent deployments or volume changes.
-Hashing runs after nodes resume. The script uses an exclusive local lock,
-resumes nodes on ordinary errors/SIGINT/SIGTERM, and rejects existing output
-directories. An `.incomplete` marker makes failed backups unrestorable.
+uncompressed. **The entire dev cluster is frozen during copying**, so choose a
+maintenance window and avoid concurrent deployments or volume changes. The
+script asks for your sudo password first, then freezes every pod and k3s
+itself with the cgroup v2 freezer (the kubelet is frozen too, so nothing fails
+a health check and restarts), and copies each volume with root `tar`,
+preserving numeric ownership. Hashing runs after the cluster resumes. The
+script uses an exclusive local lock, resumes the cluster on ordinary
+errors/SIGINT/SIGTERM, and rejects existing output directories. An
+`.incomplete` marker makes failed backups unrestorable.
 
 Each backup contains a tar archive per bound PVC, a manifest with its original
 namespace/name, capacity and SHA-256 checksums, and `argocd.json` with
@@ -34,24 +39,28 @@ are omitted when their ApplicationSet can recreate them. Names and file paths
 are mapped in the manifest; hashed archive names avoid naming collisions.
 Unknown storage backends and unbound claims fail explicitly.
 
-[Docker pause](https://docs.docker.com/reference/cli/docker/container/pause/)
-freezes processes without asking applications to flush or shut down. Treat
+The [cgroup freezer](https://docs.kernel.org/admin-guide/cgroup-v2.html#core-interface-files)
+stops processes without asking applications to flush or shut down. Treat
 these as **crash-consistent archives**, not application-consistent database
 backups or an atomic distributed snapshot. SQLite WAL and other recovery files
 are copied with their databases. Use application-native backups for systems
 that cannot recover from a crash, and validate data after every recovery drill.
 
+Backups taken with the Kind-era script verify and restore the same way:
+their archives hold each volume's contents relative to its root, as k3s
+archives do. [The migration guide](migrate-to-k3s.md) uses this.
+
 The archive is private to your user by default but **is not encrypted**. It can
 contain conversations, user accounts and application secrets held on disk or
 in Argo Helm values. Kubernetes Secrets, private Git credentials, external
 services, host configuration and model weights are not exported. A host-side
-backup survives deleting Kind, but not losing that host/disk: copy it to a
+backup survives uninstalling k3s, but not losing that host/disk: copy it to a
 separate protected location. Checksums detect corruption, not tampering; only
 restore trusted backups.
 
 The home-network root certificate authority is not in these archives either.
 It lives on the host in `~/.config/homelab/lab-ca/` (or `LAB_CA_DIR`), outside
-Kind, and bootstrap reloads it into every rebuilt cluster, so trusting devices
+the cluster, and bootstrap reloads it into every rebuilt cluster, so trusting devices
 keep working. Keep a copy of `ca.key` and `ca.crt` somewhere private, such as a
 password manager. If they are lost, bootstrap creates a new root and every
 device must trust the new `ca.crt`. Create the replacement cluster with the
@@ -63,15 +72,22 @@ are missing, and Garage's data does not depend on them. S3 access keys live in
 Garage's volume, so after restoring it, rerun `./scripts/ml-credentials.py` for
 each namespace to rewrite its `s3-credentials` Secret with the same key.
 
-If a forced kill or host failure prevents cleanup, inspect Docker's paused
-containers and explicitly unpause the affected dev nodes before continuing.
+If a forced kill or host failure prevents cleanup, the cluster may stay
+frozen. Thaw it before continuing (this is safe to run when nothing is frozen):
+
+```bash
+echo 0 | sudo tee /sys/fs/cgroup/system.slice/k3s.service/cgroup.freeze \
+  /sys/fs/cgroup/kubepods.slice/cgroup.freeze
+```
+
+A reboot also thaws everything.
 Never remove an `.incomplete` marker to make a failed backup appear valid.
 
 ## Restore one volume without replacing existing data
 
 `restore-volume` verifies the entire backup, checks destination capacity, and
-requires an **empty, bound PVC with no active pod using it**. It pauses the dev
-nodes for the copy and preserves numeric ownership and file modes. It never
+requires an **empty, bound PVC with no active pod using it**. It freezes the
+cluster for the copy and preserves numeric ownership and file modes. It never
 clears or overwrites an occupied volume.
 
 Start by bootstrapping a replacement cluster if needed. Keep the original
@@ -79,50 +95,24 @@ backup and any surviving volume untouched. The example below restores chat to
 a separate PVC and can also be used as a drill. Change the size to at least the
 original claim capacity listed in `manifest.json`.
 
-Kind uses `WaitForFirstConsumer`, so a temporary pod binds the new PVC. It does
-not write into the volume:
+Local-path volumes are created only when a pod first uses them, so
+`empty-claim` creates the claim and binds it with a temporary pod that mounts
+it read-only, then removes the pod:
 
 ```bash
-kubectl --context kind-homelab-dev apply -f - <<'YAML'
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: open-webui-restored
-  namespace: chat
-spec:
-  storageClassName: standard
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 2Gi
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: bind-chat-restore
-  namespace: chat
-spec:
-  restartPolicy: Never
-  containers:
-    - name: bind
-      image: busybox:1.37.0
-      command: ["sleep", "3600"]
-      volumeMounts:
-        - name: data
-          mountPath: /restore
-  volumes:
-    - name: data
-      persistentVolumeClaim:
-        claimName: open-webui-restored
-YAML
-kubectl --context kind-homelab-dev -n chat wait pvc/open-webui-restored \
-  --for=jsonpath='{.status.phase}'=Bound --timeout=2m
-kubectl --context kind-homelab-dev -n chat delete pod bind-chat-restore --wait=true
+./scripts/backup-dev.py empty-claim chat/open-webui-restored --size 2Gi
 ./scripts/backup-dev.py restore-volume /path/to/verified-backup chat/open-webui \
   --target-claim chat/open-webui-restored
 ```
 
-The temporary pod has been removed before restoration. For an existing
+To restore into the original claim name instead, stop its writers (below),
+then `./scripts/backup-dev.py empty-claim chat/open-webui --replace`
+**deletes that claim and its data** and recreates it empty with the same size
+and Helm ownership, so the chart adopts it. It refuses while a pod uses the
+claim. New claims use the `standard` class unless `--storage-class
+local-path` is given; both are the same k3s storage.
+
+`empty-claim` removes its temporary pod before returning. For an existing
 application-owned target, suspend both its Flux Kustomization and HelmRelease
 (or its Argo application's sync), scale its writers to zero and wait for their
 pods to disappear first. Prevent controllers from recreating writers until
@@ -138,7 +128,7 @@ annotations:
 ```
 
 Confirm the successful Helm release manifest includes this annotation on the
-original PVC (`helm --kube-context kind-homelab-dev -n chat get manifest open-webui`).
+original PVC (`helm --kube-context homelab-dev -n chat get manifest open-webui`).
 Helm's [resource retention annotation](https://helm.sh/docs/howto/charts_tips_and_tricks/#tell-helm-not-to-uninstall-a-resource)
 prevents the subsequent chart change from deleting its original PVC. The retained
 claim becomes your responsibility to manage.
@@ -165,8 +155,8 @@ After recovering application data and any required credentials, inspect
 complete storage configuration first:
 
 ```bash
-kubectl --context kind-homelab-dev apply --dry-run=server -f /path/to/verified-backup/argocd.json
-kubectl --context kind-homelab-dev apply -f /path/to/verified-backup/argocd.json
+kubectl --context homelab-dev apply --dry-run=server -f /path/to/verified-backup/argocd.json
+kubectl --context homelab-dev apply -f /path/to/verified-backup/argocd.json
 ```
 
 A backup taken in llm mode (`"lab_mode": "llm"` in `manifest.json`) holds
