@@ -30,11 +30,14 @@ WORKLOADS = "deployments.apps,statefulsets.apps"
 # that targets one of them is skipped with a warning instead.
 # ml-storage and mlflow are platform services that applications (and the
 # person using llm mode) keep relying on; stopping them would only lose
-# in-flight uploads.
+# in-flight uploads. kafka holds messages applications have not consumed
+# yet, and kueue-system runs the controller whose webhook every queued Job
+# passes through; both stay up so applications resume where they left off.
 PLATFORM_NAMESPACES = frozenset({
     "argocd", "cert-manager", "chat", "envoy-gateway-system", "flux-system",
-    "gateway-system", "kube-node-lease", "kube-public", "kube-system", "llm",
-    "local-path-storage", "ml-storage", "mlflow", "monitoring",
+    "gateway-system", "kafka", "kube-node-lease", "kube-public", "kube-system",
+    "kueue-system", "llm", "local-path-storage", "ml-storage", "mlflow",
+    "monitoring",
 })
 IN_CLUSTER = {"https://kubernetes.default.svc", "in-cluster"}
 CHAT_URLS = ("http://chat.localhost:8080", "https://chat.lab.internal (if home-network access is on)")
