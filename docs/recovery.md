@@ -2,7 +2,11 @@
 
 Kind's `standard` PVCs live inside node containers. Deleting the cluster deletes
 those volumes. Models in `MODELS_DIR` are host-mounted and survive; metrics,
-logs, dashboards, chat history, and application databases need their own copy.
+logs, dashboards, chat history, application databases, S3 objects (datasets,
+checkpoints, MLflow artifacts) and MLflow's tracking database need their own
+copy. The backup includes every bound PVC, so Garage's `ml-storage/garage`
+and MLflow's `mlflow/mlflow` claims are archived like the others. Garage's
+volume can hold up to 50 Gi; allow for it on the backup disk.
 
 ## Create and verify a backup
 
@@ -52,6 +56,12 @@ keep working. Keep a copy of `ca.key` and `ca.crt` somewhere private, such as a
 password manager. If they are lost, bootstrap creates a new root and every
 device must trust the new `ca.crt`. Create the replacement cluster with the
 same `LAN_ADDRESS` to keep home-network access.
+
+Garage's RPC secret and admin token in `~/.config/homelab/ml-storage/` are not
+in these archives and do not need to be: bootstrap generates new ones if they
+are missing, and Garage's data does not depend on them. S3 access keys live in
+Garage's volume, so after restoring it, rerun `./scripts/ml-credentials.py` for
+each namespace to rewrite its `s3-credentials` Secret with the same key.
 
 If a forced kill or host failure prevents cleanup, inspect Docker's paused
 containers and explicitly unpause the affected dev nodes before continuing.

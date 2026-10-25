@@ -1,7 +1,8 @@
 # Homelab
 
 A reproducible Ubuntu development platform with Kubernetes, GitOps, monitoring,
-and a GPU-backed local chat service. Ansible configures the host; Flux manages
+a GPU-backed local chat service, and S3 storage plus experiment tracking for
+machine-learning work. Ansible configures the host; Flux manages
 the platform; Argo CD deploys applications from their own repositories.
 
 ```text
@@ -11,6 +12,8 @@ Ubuntu → Docker → Kind: homelab-dev (one control plane, two workers)
                     ├─ Prometheus, Grafana, Loki and Alloy
                     ├─ llama.cpp / Vulkan → Qwen3-8B, started on demand
                     │    └─ llm-demand controller → scales the LLM and Open WebUI
+                    ├─ Garage → in-cluster S3 (datasets, checkpoints, MLflow artifacts)
+                    ├─ MLflow → experiment tracking
                     └─ Argo CD → independently registered applications
 ```
 
@@ -68,6 +71,7 @@ It checks the mounts and labels compatible workers so the server can schedule.
 | LLM API (llm mode, or while an app requests it) | <http://llm.localhost:8080/v1> | — | None |
 | Grafana | <http://grafana.localhost:8080> | `https://grafana.lab.internal` | Generated credentials |
 | Argo CD | <http://argocd.localhost:8080> | — | `admin`, generated password |
+| MLflow | <http://mlflow.localhost:8080> | — | None |
 
 In apps mode the chat is stopped and the LLM API is usually off; switch with
 `./scripts/lab-mode.py llm` to use them. See
@@ -78,7 +82,10 @@ on the host itself. Home-network addresses need a cluster created with
 `LAN_ADDRESS`, plus router and device setup; see
 [home network access](docs/operations.md#home-network-access). The LLM API and
 Argo CD stay on this host because they are unauthenticated or control the
-cluster.
+cluster; so does MLflow, which has no login. Inside the cluster, applications
+use S3 at `http://s3.ml-storage.svc.cluster.local:9000` and MLflow at
+`http://mlflow.mlflow.svc.cluster.local:5000`; see
+[ML storage and experiment tracking](docs/operations.md#ml-storage-and-experiment-tracking).
 
 ## Day-to-day commands
 
@@ -87,6 +94,7 @@ cluster.
 ./scripts/lab-mode.py llm --wait           # Stop apps; run only the LLM and chat
 ./scripts/lab-mode.py apps                 # Back to apps (the default)
 ./scripts/download-models.sh --check       # Verify weights without downloading
+./scripts/ml-credentials.py crosswalk      # S3 credentials Secret for a namespace
 flux get kustomizations --context kind-homelab-dev
 kubectl --context kind-homelab-dev get pods,pvc -A
 ./scripts/backup-dev.py create             # Pauses dev nodes while copying PVCs
@@ -102,11 +110,11 @@ weights and host-side backups survive cluster deletion.
 | Path | Purpose |
 | --- | --- |
 | `ansible/` | Ubuntu host configuration and tool installation |
-| `scripts/` | Bootstrap, model download, lab mode switch, backup and recovery |
+| `scripts/` | Bootstrap, model download, lab mode switch, S3 credentials, backup and recovery |
 | `kubernetes/clusters/dev/` | Flux reconciliation and dependency ordering |
-| `kubernetes/infrastructure/` | Gateway, cert-manager, monitoring, logging, Argo CD, LLM and chat |
+| `kubernetes/infrastructure/` | Gateway, cert-manager, monitoring, logging, Argo CD, LLM, chat, S3 storage and MLflow |
 | `kubernetes/kind/` | Dev template and an unused `homelab-lab` configuration |
-| `tests/` | Bootstrap, recovery, LLM demand and lab mode regressions |
+| `tests/` | Bootstrap, recovery, LLM demand, lab mode, S3 setup and credential regressions |
 | `docs/` | Operations and recovery guides |
 
 Applications stay in their own repositories; register them through Argo CD.
@@ -129,6 +137,8 @@ adds three capabilities:
    unavailable server or sustained queue backlog.
 3. **LLM on demand:** the GPU server runs only while an application requests
    it, and an LLM mode pauses every application for personal chat.
+4. **ML platform:** S3-compatible object storage (Garage) and an MLflow
+   tracking server for GPU training and inference projects.
 
 The next operational gaps are off-host encrypted backups, an external alert
 receiver, and managed secrets. Public access would also require authentication

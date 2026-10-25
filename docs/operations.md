@@ -63,7 +63,8 @@ namespaces to zero, saving each previous replica count in
 then the sync policies, and removes the annotations. Both are safe to rerun
 after an interruption, and running `llm` twice never overwrites what was saved
 the first time. Platform namespaces (`argocd`, `flux-system`, `monitoring`,
-`llm`, `chat` and the other platform and Kubernetes system namespaces) are
+`llm`, `chat`, `ml-storage`, `mlflow` and the other platform and Kubernetes
+system namespaces) are
 never touched; an Application that deploys into one is left running with a
 warning.
 
@@ -138,6 +139,91 @@ Its metrics (`llm_demand_mode`, `llm_demand_requests`,
 | Applications are still stopped after `apps` | Rerun `./scripts/lab-mode.py apps`; `status` lists anything still paused |
 | An application restarts during llm mode | An ApplicationSet or parent app turned its sync back on. `status` warns about it; rerun `./scripts/lab-mode.py llm` or pause the parent |
 | Mode changes do nothing | `kubectl --context kind-homelab-dev -n llm get deployment llm-demand` and its logs; the controller does the LLM and chat scaling |
+
+## ML storage and experiment tracking
+
+The platform provides object storage and experiment tracking for machine
+learning workloads, such as training jobs and inference services deployed
+through Argo CD. Both are platform components managed by Flux, so llm mode
+never stops them.
+
+| | Inside the cluster | On this host |
+| --- | --- | --- |
+| S3 object storage (Garage) | `http://s3.ml-storage.svc.cluster.local:9000` | — |
+| MLflow tracking server | `http://mlflow.mlflow.svc.cluster.local:5000` | <http://mlflow.localhost:8080> |
+
+Buckets: `datasets`, `checkpoints` and `mlflow-artifacts`. Clients must use
+**path-style addressing** and region `us-east-1` (boto3's default). MLflow
+has no login, so it is not offered on the home network.
+
+### S3 credentials for an application
+
+Each namespace that needs S3 gets its own access key:
+
+```bash
+./scripts/ml-credentials.py crosswalk                       # datasets and checkpoints
+./scripts/ml-credentials.py crosswalk --bucket datasets     # only the buckets named
+```
+
+The script creates the Garage key `k8s-crosswalk` (or reuses it), grants it
+read and write on the buckets, and writes Secret `s3-credentials` in that
+namespace with `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. The namespace
+must exist first. Rerunning it is safe: the key and its credentials stay the
+same and permissions are only added. Use the Secret with `envFrom` and set
+the endpoint yourself, for example in Python:
+
+```python
+import boto3
+from botocore.config import Config
+
+s3 = boto3.client("s3", endpoint_url="http://s3.ml-storage.svc.cluster.local:9000",
+                  config=Config(s3={"addressing_style": "path"}))
+```
+
+The credentials live in Garage's own database and in the Secret, never in
+Git. To revoke one, delete the key inside the Garage pod
+(`kubectl --context kind-homelab-dev -n ml-storage exec deploy/garage -- /garage key delete --yes k8s-crosswalk`)
+and the Secret.
+
+### MLflow
+
+Set `MLFLOW_TRACKING_URI=http://mlflow.mlflow.svc.cluster.local:5000`. The
+server stores artifacts in the `mlflow-artifacts` bucket itself
+(`--serve-artifacts`), so clients need no S3 credentials for MLflow
+artifacts. Runs, parameters and metrics are in a SQLite database on a 2 Gi
+volume; that suits one user. A PostgreSQL backend store is the upgrade path
+for concurrent heavy writers. The server only accepts the Host headers it
+expects (DNS rebinding protection); a client using another name for the
+Service gets HTTP 403 and needs adding to `--allowed-hosts` in
+[`deployment.yaml`](../kubernetes/infrastructure/mlflow/deployment.yaml).
+
+### How it is set up
+
+Garage (`dxflrs/garage:v2.4.1`) runs as one node with no replication, on a
+50 Gi volume. Its RPC secret and admin token are generated once by
+`bootstrap-dev.sh` in `~/.config/homelab/ml-storage/` (or `ML_STORAGE_DIR`)
+and loaded as Secret `ml-storage/garage`; they are never in Git. They do not
+protect any data at rest, so if they are lost, delete both files and rerun
+bootstrap: it generates new ones, and Garage keeps its data. A `garage-setup`
+Job creates any missing bucket through Garage's admin API; bootstrap then
+runs `ml-credentials.py mlflow --bucket mlflow-artifacts` before it waits for
+MLflow. Until bootstrap has run on a cluster, the `ml-storage` and `mlflow`
+Flux Kustomizations stay not ready; nothing else depends on them.
+
+Some admin API response shapes could not be checked against a live server
+when this was written. The setup Job and `ml-credentials.py` check every
+response and stop with the response text if it differs from what they
+expect, rather than guessing.
+
+| Symptom | Next check |
+| --- | --- |
+| `ml-storage` Kustomization not ready; Garage pod `CreateContainerConfigError` | Secret `ml-storage/garage` is missing: rerun `./scripts/bootstrap-dev.sh` |
+| `garage-setup` Job failed | `kubectl --context kind-homelab-dev -n ml-storage logs job/garage-setup`. A rejected token means the Secret changed after Garage started: `kubectl ... -n ml-storage rollout restart deployment/garage`, then delete the Job so Flux recreates it |
+| Setup waits for "no storage node in the layout" | `kubectl --context kind-homelab-dev -n ml-storage exec deploy/garage -- /garage status` and the Garage log |
+| MLflow pod `CreateContainerConfigError` | Secret `mlflow/s3-credentials` is missing: `./scripts/ml-credentials.py mlflow --bucket mlflow-artifacts` |
+| MLflow answers 403 Invalid Host header | Use `mlflow.localhost:8080` or the Service name with port 5000; see `--allowed-hosts` |
+| Artifact upload fails | MLflow log; `./scripts/ml-credentials.py mlflow --bucket mlflow-artifacts` restores its key's permissions |
+| S3 client gets `NoSuchBucket` or DNS errors for `BUCKET.s3...` | The client uses virtual-host addressing; switch it to path-style |
 
 ## Home network access
 
@@ -281,7 +367,8 @@ configured. The pinned server's [metrics reference](https://github.com/ggml-org/
 describes what each measurement means.
 
 Prometheus retains seven days on a 5 Gi PVC. Loki retains seven days on a
-10 Gi PVC; Grafana's database uses 1 Gi and Open WebUI uses 2 Gi. The `standard`
+10 Gi PVC; Grafana's database uses 1 Gi and Open WebUI uses 2 Gi. Garage's
+object storage uses 50 Gi and MLflow's database 2 Gi. The `standard`
 local-path storage class persists through pod restarts, but its data is inside
 Kind nodes. [Back up before deleting the cluster](recovery.md).
 
@@ -340,7 +427,8 @@ The normal `.localhost:8080` UI links require the current mapping.
 
 ## Tests
 
-Bootstrap, recovery, LLM demand controller and lab mode regressions run with:
+Bootstrap, recovery, LLM demand controller, lab mode, Garage setup and S3
+credential regressions run with:
 
 ```bash
 python3 -m unittest discover -s tests
