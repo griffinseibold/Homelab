@@ -141,6 +141,13 @@ def registrations():
     return {"apiVersion": "v1", "kind": "List", "items": items}
 
 
+def lab_mode():
+    """The lab mode from scripts/lab-mode.py; cluster state recorded for reference."""
+    configmap = output("kubectl", "--context", CONTEXT, "--request-timeout=30s", "get", "configmap",
+                       "lab-mode", "-n", "llm", "--ignore-not-found", "-o", "json").strip()
+    return json.loads(configmap).get("data", {}).get("mode", "apps") if configmap else "apps"
+
+
 def checksum(path):
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -244,6 +251,7 @@ def create(directory):
     cluster_nodes = nodes()
     volumes = volume_inventory(cluster_nodes)
     argo = registrations()
+    mode = lab_mode()
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
     (directory / ".incomplete").touch()
     write_json(directory / "argocd.json", argo)
@@ -259,6 +267,9 @@ def create(directory):
     write_json(directory / "manifest.json", {
         "version": 1, "cluster": CLUSTER,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        # In llm mode the exported Applications are paused; their saved sync
+        # policy stays in an annotation for ./scripts/lab-mode.py apps.
+        "lab_mode": mode,
         "volumes": volumes, "sha256": {name: checksum(directory / name) for name in files},
     })
     (directory / ".incomplete").unlink()

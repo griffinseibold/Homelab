@@ -41,6 +41,7 @@ class BackupTests(unittest.TestCase):
         with patch.object(backup, "nodes", return_value=["worker"]), \
              patch.object(backup, "volume_inventory", return_value=[self.volume]), \
              patch.object(backup, "registrations", return_value={"items": []}), \
+             patch.object(backup, "lab_mode", return_value="llm"), \
              patch.object(backup, "paused"), patch.object(backup, "archive_volume", side_effect=archive):
             backup.create(self.directory)
         return self.directory
@@ -51,6 +52,17 @@ class BackupTests(unittest.TestCase):
         args = output.call_args.args
         self.assertLess(args.index("get"), args.index("-A"))
         self.assertEqual(args[args.index("--context") + 1], "kind-homelab-dev")
+
+    def test_lab_mode_is_recorded_and_defaults_to_apps(self):
+        self.snapshot()
+        self.assertEqual(json.loads((self.directory / "manifest.json").read_text())["lab_mode"], "llm")
+        with patch.object(backup, "output", return_value="") as output:
+            self.assertEqual(backup.lab_mode(), "apps")
+        args = output.call_args.args
+        self.assertEqual(args[args.index("--context") + 1], "kind-homelab-dev")
+        self.assertIn("--ignore-not-found", args)
+        with patch.object(backup, "output", return_value='{"data": {"mode": "llm"}}'):
+            self.assertEqual(backup.lab_mode(), "llm")
 
     def test_create_verify_and_restore_preserve_bytes(self):
         self.snapshot()
@@ -92,6 +104,7 @@ class BackupTests(unittest.TestCase):
         with patch.object(backup, "nodes", return_value=["worker"]), \
              patch.object(backup, "volume_inventory", return_value=[self.volume]), \
              patch.object(backup, "registrations", return_value={"items": []}), \
+             patch.object(backup, "lab_mode", return_value="apps"), \
              patch.object(backup, "paused"), patch.object(backup, "require_unused_volume"), \
              patch.object(backup, "archive_volume", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
