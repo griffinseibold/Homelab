@@ -28,6 +28,9 @@ import tempfile
 CLUSTER = "homelab-dev"
 CONTEXT = CLUSTER  # The k3s kubeconfig context (ansible/roles/k3s).
 STORAGE_CLASS = "local-path"
+# kubernetes/infrastructure/storage keeps Kind's class name as an alias of
+# local-path, for application charts written for Kind.
+STORAGE_CLASSES = (STORAGE_CLASS, "standard")
 # k3s's local-path provisioner keeps every volume under this directory.
 STORAGE_ROOT = "/var/lib/rancher/k3s/storage/"
 # Copies and freezing need root; -n never prompts once the cluster is frozen
@@ -144,7 +147,7 @@ def volume_inventory(names, only_claim=None):
                 if expr["key"] == "kubernetes.io/hostname" and expr["operator"] == "In":
                     hosts.update(expr["values"])
         path = spec.get("hostPath", spec.get("local", {})).get("path", "")
-        if (spec.get("storageClassName") != STORAGE_CLASS
+        if (spec.get("storageClassName") not in STORAGE_CLASSES
                 or spec.get("volumeMode", "Filesystem") != "Filesystem"
                 or len(hosts) != 1 or not hosts.issubset(names)
                 or not path.startswith(STORAGE_ROOT) or len(PurePosixPath(path).parts) < 7
@@ -405,11 +408,13 @@ def empty_claim_manifest(pvc):
     return {"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": metadata, "spec": spec}
 
 
-def new_claim_manifest(namespace, name, size):
+def new_claim_manifest(namespace, name, size, storage_class):
     storage_bytes(size)  # Rejects a malformed quantity before anything changes.
+    if storage_class not in STORAGE_CLASSES:
+        raise ValueError(f"Storage class must be one of {', '.join(STORAGE_CLASSES)}")
     return {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
             "metadata": {"name": name, "namespace": namespace},
-            "spec": {"accessModes": ["ReadWriteOnce"], "storageClassName": STORAGE_CLASS,
+            "spec": {"accessModes": ["ReadWriteOnce"], "storageClassName": storage_class,
                      "resources": {"requests": {"storage": size}}}}
 
 
@@ -429,7 +434,7 @@ def bind_pod_manifest(namespace, claim):
                      "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": claim}}]}}
 
 
-def empty_claim(claim, size=None, replace=False):
+def empty_claim(claim, size=None, replace=False, storage_class="standard"):
     """Leave namespace/claim as an empty, bound claim for restore-volume."""
     namespace, _, name = claim.partition("/")
     if not namespace or not name:
@@ -448,7 +453,7 @@ def empty_claim(claim, size=None, replace=False):
         if replace:
             raise ValueError(f"{claim} does not exist; there is nothing to replace")
         kubectl("get", "namespace", namespace)  # Fails clearly if the namespace is missing.
-        manifest = new_claim_manifest(namespace, name, size)
+        manifest = new_claim_manifest(namespace, name, size, storage_class)
     kubectl("create", "-f", "-", stdin=json.dumps(manifest))
     pod = bind_pod_manifest(namespace, name)
     kubectl("create", "-f", "-", stdin=json.dumps(pod))
@@ -483,6 +488,10 @@ def main():
     empty_parser.add_argument("--size", help="Capacity for a new claim, at least the original's (manifest.json)")
     empty_parser.add_argument("--replace", action="store_true",
                               help="Delete the existing claim and its data, then recreate it empty")
+    # Every Kind volume was "standard", so a claim restored for an
+    # application keeps the class its chart was written for.
+    empty_parser.add_argument("--storage-class", default="standard", choices=STORAGE_CLASSES,
+                              help="Class for a new claim (default: standard, Kind's class name)")
     args = parser.parse_args()
     try:
         if args.command == "create":
@@ -490,7 +499,7 @@ def main():
                 create(args.output.expanduser().resolve())
         elif args.command == "empty-claim":
             with operation_lock():
-                empty_claim(args.claim, args.size, args.replace)
+                empty_claim(args.claim, args.size, args.replace, args.storage_class)
         elif args.command == "verify":
             snapshot = verified_snapshot(args.directory)
             print(f'Backup verified: {len(snapshot["volumes"])} volume(s), plus Argo registrations')

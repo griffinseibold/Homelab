@@ -329,6 +329,9 @@ class BackupTests(unittest.TestCase):
             self.assertNotEqual(volumes[0]["archive"], volumes[1]["archive"])
             with self.assertRaisesRegex(ValueError, "Unsupported"):
                 backup.volume_inventory(["different-cluster-node"])
+            pv["spec"]["storageClassName"] = "standard"  # Kind's name, aliased on k3s.
+            self.assertEqual(len(backup.volume_inventory(["host"])), 2)
+            pv["spec"]["storageClassName"] = "local-path"
             for path in ("/var/lib/rancher/k3s/storage", "/var/local-path-provisioner/pvc-123",
                          "/var/lib/rancher/k3s/storage/../../../etc"):
                 pv["spec"]["hostPath"]["path"] = path
@@ -392,7 +395,7 @@ class BackupTests(unittest.TestCase):
         with patch.object(backup, "kubectl", side_effect=kubectl), redirect_stdout(io.StringIO()):
             backup.empty_claim("hello-crud/data", size="1Gi")
         claim = next(body for args, body in calls if body and body["kind"] == "PersistentVolumeClaim")
-        self.assertEqual(claim["spec"]["storageClassName"], "local-path")
+        self.assertEqual(claim["spec"]["storageClassName"], "standard")
         self.assertEqual(claim["spec"]["resources"]["requests"]["storage"], "1Gi")
         for size, replace, message in ((None, False, "--size"), ("1Gi", True, "nothing to replace"),
                                        ("lots", False, "Unsupported storage quantity")):

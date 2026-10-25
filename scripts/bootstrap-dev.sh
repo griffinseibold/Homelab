@@ -369,6 +369,7 @@ wait_for_flux_kustomizations() {
     "${repository_root}/kubernetes/clusters/dev/infrastructure/monitoring.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/logging.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/argocd.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/storage.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/gpu.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/llm.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/chat.yaml"

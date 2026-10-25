@@ -1,0 +1,14 @@
+# Kind's default storage class was named "standard". k3s's is "local-path".
+# This second class uses the same k3s local-path provisioner under the old
+# name, so application charts and backups made on Kind that name
+# "standard" keep working unchanged. It is not the default; claims that name
+# no class get local-path. Both store data under /var/lib/rancher/k3s/storage.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: standard
+provisioner: rancher.io/local-path
+# As k3s's local-path class: the volume is created on the node where its
+# first pod runs, and deleted with its claim.
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
