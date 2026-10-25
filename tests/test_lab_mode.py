@@ -192,6 +192,26 @@ class LabModeTests(unittest.TestCase):
         patched = [call for call in self.cluster.calls if call[0] == "patch" and call[1] != "application.argoproj.io"]
         self.assertTrue(all(call[call.index("-n") + 1] in ("hello-crud", "manual") for call in patched))
 
+    def test_ml_platform_namespaces_are_never_stopped(self):
+        c = self.cluster
+        c.add("Application", "argocd", "crosswalk",
+              {"destination": {"server": "https://kubernetes.default.svc", "namespace": "crosswalk"},
+               "syncPolicy": copy.deepcopy(AUTOMATED)})
+        c.add("Application", "argocd", "misplaced",
+              {"destination": {"namespace": "mlflow"}, "syncPolicy": copy.deepcopy(AUTOMATED)})
+        c.add("Deployment", "crosswalk", "api", {"replicas": 1})
+        storage = c.add("Deployment", "ml-storage", "garage", {"replicas": 1})
+        tracking = c.add("Deployment", "mlflow", "mlflow", {"replicas": 1})
+        before = copy.deepcopy((storage, tracking))
+        _, err = self.assert_ok("llm")
+        self.assertIn("platform namespace mlflow", err)
+        self.assertEqual((storage, tracking), before)
+        self.assertEqual(c.obj("Deployment", "crosswalk", "api")["spec"]["replicas"], 0)
+        storage["metadata"]["annotations"] = {lab.SAVED_REPLICAS: "5"}  # Never set by lab mode.
+        self.assert_ok("apps")
+        self.assertEqual(storage["spec"]["replicas"], 1)
+        self.assertEqual(c.obj("Deployment", "crosswalk", "api")["spec"]["replicas"], 1)
+
     def test_round_trip_restores_everything_exactly(self):
         self.assert_ok("llm")
         self.assert_ok("apps")
