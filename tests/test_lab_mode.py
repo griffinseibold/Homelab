@@ -212,6 +212,27 @@ class LabModeTests(unittest.TestCase):
         self.assertEqual(storage["spec"]["replicas"], 1)
         self.assertEqual(c.obj("Deployment", "crosswalk", "api")["spec"]["replicas"], 1)
 
+    def test_streaming_and_queueing_namespaces_are_never_stopped(self):
+        c = self.cluster
+        c.add("Application", "argocd", "crosswalk",
+              {"destination": {"server": "https://kubernetes.default.svc", "namespace": "crosswalk"},
+               "syncPolicy": copy.deepcopy(AUTOMATED)})
+        c.add("Application", "argocd", "misplaced",
+              {"destination": {"namespace": "kafka"}, "syncPolicy": copy.deepcopy(AUTOMATED)})
+        c.add("Deployment", "crosswalk", "worker", {"replicas": 1})
+        broker = c.add("Deployment", "kafka", "kafka", {"replicas": 1})
+        exporter = c.add("Deployment", "kafka", "kafka-exporter", {"replicas": 1})
+        kueue = c.add("Deployment", "kueue-system", "kueue-controller-manager", {"replicas": 1})
+        before = copy.deepcopy((broker, exporter, kueue))
+        _, err = self.assert_ok("llm")
+        self.assertIn("platform namespace kafka", err)
+        self.assertEqual((broker, exporter, kueue), before)
+        self.assertEqual(c.obj("Deployment", "crosswalk", "worker")["spec"]["replicas"], 0)
+        self.assert_ok("apps")
+        self.assertEqual((broker, exporter, kueue), before)
+        self.assertEqual(c.obj("Deployment", "crosswalk", "worker")["spec"]["replicas"], 1)
+        self.assertLessEqual({"kafka", "kueue-system"}, lab.PLATFORM_NAMESPACES)
+
     def test_round_trip_restores_everything_exactly(self):
         self.assert_ok("llm")
         self.assert_ok("apps")
