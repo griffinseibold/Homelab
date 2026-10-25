@@ -14,4 +14,5 @@ resources:
   - chat.yaml
   - ml-storage.yaml
   - mlflow.yaml
+  - kafka.yaml
 

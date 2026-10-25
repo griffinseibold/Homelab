@@ -1,0 +1,25 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/name: kafka
+    # Match the kube-prometheus-stack rule selector.
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: kafka
+      rules:
+        - alert: KafkaBrokerUnavailable
+          # The fallback also catches a missing pod, endpoint or discovery.
+          # Kafka is a platform service that runs all the time, unlike the
+          # LLM, so there is no scaled-to-zero case to exclude.
+          expr: (max(up{namespace="kafka", service="kafka-metrics"}) or vector(0)) < 1
+          for: 10m
+          labels:
+            severity: warning
+            namespace: kafka
+            service: kafka
+          annotations:
+            summary: The Kafka broker's metrics have been unavailable for 10 minutes
+            description: Check the kafka pod in namespace kafka, its fetch-jmx-agent init container (it needs GitHub only until the agent is cached on the volume), the volume, and the broker log. Producers and consumers fail until it recovers.

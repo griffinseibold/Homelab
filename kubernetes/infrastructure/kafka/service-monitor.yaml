@@ -1,0 +1,37 @@
+# Prometheus discovers ServiceMonitors in every namespace without a release
+# label (serviceMonitorSelectorNilUsesHelmValues: false).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/name: kafka
+spec:
+  # The JMX exporter agent inside the broker: throughput, partitions and
+  # the controller.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+      app.kubernetes.io/component: metrics
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kafka-exporter
+  labels:
+    app.kubernetes.io/name: kafka-exporter
+spec:
+  # Consumer group lag, computed by kafka-exporter from the broker's offsets.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka-exporter
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 20s

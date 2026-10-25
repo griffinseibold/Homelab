@@ -1,0 +1,21 @@
+# Kafka logs to standard output only, where Alloy collects every pod's log
+# into Loki. The image's default configuration also writes rolling files
+# under the installation directory, which is read-only here and would only
+# duplicate the pod log on disk.
+Configuration:
+  Appenders:
+    Console:
+      name: STDOUT
+      PatternLayout:
+        pattern: "[%d] %p %m (%c)%n"
+  Loggers:
+    Root:
+      level: INFO
+      AppenderRef:
+        - ref: STDOUT
+    Logger:
+      # As in Kafka's default configuration: one line per request is noise.
+      - name: kafka.request.logger
+        level: WARN
+      - name: kafka.network.RequestChannel$
+        level: WARN

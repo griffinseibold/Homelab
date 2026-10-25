@@ -1,0 +1,88 @@
+# Consumer group lag is not a broker metric: it is the difference between
+# each partition's newest offset and the offset a group has committed, which
+# only a client can compute. kafka_exporter asks the broker for both every
+# scrape and publishes kafka_consumergroup_lag and friends.
+# https://github.com/danielqsj/kafka_exporter
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-exporter
+  labels:
+    app.kubernetes.io/name: kafka-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka-exporter
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # The image's "nobody" user; the exporter keeps no files.
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exporter
+          # v1.11.0 (October 2026) is the first release that reads lag for
+          # consumer groups using the new KIP-848 protocol
+          # (group.protocol=consumer), and its Kafka client (Sarama 1.61.0)
+          # knows broker versions up to 4.3.1. Published to Docker Hub by
+          # the project's release workflow under the Git tag name.
+          image: danielqsj/kafka-exporter:v1.11.0
+          args:
+            - --kafka.server=kafka.kafka.svc.cluster.local:9092
+            # Must match the broker image in kafka.yaml. The exporter picks
+            # its protocol versions and the KIP-848 group API from it.
+            - --kafka.version=4.3.1
+            # Kafka's own internal topics (__consumer_offsets and the like)
+            # would only clutter the dashboard.
+            - --topic.exclude=^__.*
+            - --web.listen-address=:9308
+          ports:
+            - name: metrics
+              containerPort: 9308
+          # The exporter exits if the broker is unreachable when it starts,
+          # so on a fresh install it restarts a few times until Kafka is up.
+          # Liveness waits long enough for that not to look like a failure.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-exporter
+  labels:
+    app.kubernetes.io/name: kafka-exporter
+spec:
+  selector:
+    app.kubernetes.io/name: kafka-exporter
+  ports:
+    - name: metrics
+      port: 9308
+      targetPort: metrics
