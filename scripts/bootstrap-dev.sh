@@ -351,11 +351,12 @@ wait_for_gateway_api() {
 wait_for_gateway_endpoint() {
   local host_header="$1"
   local path="$2"
+  local timeout_seconds="${3:-120}"
   local endpoint
   local deadline
 
   endpoint="$(gateway_url)${path}"
-  deadline=$((SECONDS + 120))
+  deadline=$((SECONDS + timeout_seconds))
 
   until curl --noproxy '*' --fail --silent --max-time 2 \
     --header "Host: ${host_header}" "${endpoint}" >/dev/null; do
@@ -370,9 +371,10 @@ wait_for_gateway_endpoint() {
 wait_for_lan_endpoint() {
   local hostname="$1"
   local path="$2"
+  local timeout_seconds="${3:-120}"
   local deadline
 
-  deadline=$((SECONDS + 120))
+  deadline=$((SECONDS + timeout_seconds))
 
   until curl --noproxy '*' --fail --silent --max-time 2 \
     --cacert "${lab_ca_dir}/ca.crt" \
@@ -386,8 +388,32 @@ wait_for_lan_endpoint() {
   done
 }
 
+# The lab mode is cluster state written by scripts/lab-mode.py, not Git. A
+# missing ConfigMap means apps mode.
+current_lab_mode() {
+  local mode
+
+  mode="$(
+    kubectl --context "${cluster_context}" --namespace llm \
+      get configmap lab-mode --ignore-not-found -o jsonpath='{.data.mode}'
+  )"
+  if [[ "${mode}" == "llm" ]]; then
+    echo llm
+  else
+    echo apps
+  fi
+}
+
+wait_for_llm_demand() {
+  # The controller decides whether the LLM and chat run, so it is what must
+  # be healthy. Its readiness means it has completed a loop against the API.
+  kubectl --context "${cluster_context}" --namespace llm \
+    rollout status deployment/llm-demand --timeout=5m
+}
+
 main() {
   local existing_clusters
+  local lab_mode
   local llm_nodes
   local node_name
 
@@ -454,10 +480,20 @@ main() {
   wait_for_gateway_api
   wait_for_gateway_endpoint grafana.localhost /api/health
   wait_for_gateway_endpoint argocd.localhost /healthz
-  wait_for_gateway_endpoint llm.localhost /health
-  wait_for_gateway_endpoint chat.localhost /health
+  wait_for_llm_demand
+  lab_mode="$(current_lab_mode)"
+  # In apps mode the LLM runs only while an application requests it and the
+  # chat is stopped, so their endpoints are expected to be down. Their routes
+  # were still checked above. In llm mode the controller may have just
+  # started them, so allow for the model to load.
+  if [[ "${lab_mode}" == "llm" ]]; then
+    wait_for_gateway_endpoint llm.localhost /health 600
+    wait_for_gateway_endpoint chat.localhost /health 600
+  fi
   if [[ -n "${lan_address}" ]]; then
-    wait_for_lan_endpoint "chat.${lab_domain}" /health
+    if [[ "${lab_mode}" == "llm" ]]; then
+      wait_for_lan_endpoint "chat.${lab_domain}" /health 600
+    fi
     wait_for_lan_endpoint "grafana.${lab_domain}" /api/health
   fi
 
@@ -474,8 +510,15 @@ main() {
   echo
   echo "Applications are registered through Argo CD and are not part of this"
   echo "repository; re-register them in the Argo CD UI after a cluster rebuild."
-  echo "Access the chat UI at http://chat.localhost:8080"
-  echo "Access the LLM API at http://llm.localhost:8080/v1"
+  if [[ "${lab_mode}" == "llm" ]]; then
+    echo "The lab is in llm mode: applications are stopped; the LLM and chat are running."
+    echo "Access the chat UI at http://chat.localhost:8080"
+    echo "Access the LLM API at http://llm.localhost:8080/v1"
+    echo "Return to apps mode with: ./scripts/lab-mode.py apps"
+  else
+    echo "The lab is in apps mode: the LLM runs only while an application requests it,"
+    echo "and the chat is stopped. For personal chat, run: ./scripts/lab-mode.py llm"
+  fi
   echo "Access Grafana at http://grafana.localhost:8080"
   echo "Access Argo CD at http://argocd.localhost:8080 (user admin; password below)"
   printf '%s\n' "kubectl --context ${cluster_context} -n argocd get secret argocd-initial-admin-secret -o go-template='{{ index .data \"password\" | base64decode }}{{ \"\\n\" }}'"
@@ -483,7 +526,7 @@ main() {
   printf '%s\n' "kubectl --context ${cluster_context} -n monitoring get secret kube-prometheus-stack-grafana -o go-template='user: {{ index .data \"admin-user\" | base64decode }}{{ \"\\n\" }}password: {{ index .data \"admin-password\" | base64decode }}{{ \"\\n\" }}'"
   echo
   if [[ -n "${lan_address}" ]]; then
-    echo "Home network: https://chat.${lab_domain} and https://grafana.${lab_domain} via ${lan_address}."
+    echo "Home network: https://chat.${lab_domain} (llm mode) and https://grafana.${lab_domain} via ${lan_address}."
     echo "Devices need router DNS entries for these names pointing at ${lan_address},"
     echo "and must trust the root certificate ${lab_ca_dir}/ca.crt (docs/operations.md)."
   else

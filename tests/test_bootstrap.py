@@ -80,6 +80,9 @@ elif tool == "docker":
             print(os.environ["LAN_PORT_MAPPING"])
         else:
             print("127.0.0.1:8080")
+elif tool == "kubectl" and args[2:6] == ["--namespace", "llm", "get", "configmap"]:
+    # The lab mode is cluster state; unset means the ConfigMap is missing.
+    print(os.environ.get("LAB_MODE", ""), end="")
 elif tool == "curl" and "--output" in args:
     target = Path(args[args.index("--output") + 1])
     mode = os.environ.get("DOWNLOAD_MODE", "valid")
@@ -121,6 +124,7 @@ elif tool == "curl" and "--output" in args:
             LAB_CA_DIR=str(self.directory / "lab-ca"),
         )
         self.env.pop("LAN_ADDRESS", None)
+        self.env.pop("LAB_MODE", None)
         self.lab_ca = self.directory / "lab-ca"
 
     def calls(self):
@@ -379,6 +383,10 @@ elif tool == "curl" and "--output" in args:
         self.assertIn('listenAddress: "192.168.1.50"', self.lan_mapping())
         self.assertNotIn("__LAN_ADDRESS__", self.rendered.read_text())
         self.assertTrue(any(
+            call[0] == "curl" and "grafana.lab.internal:443:192.168.1.50" in call for call in self.calls()
+        ))
+        # A new cluster is in apps mode, where the chat is stopped.
+        self.assertFalse(any(
             call[0] == "curl" and "chat.lab.internal:443:192.168.1.50" in call for call in self.calls()
         ))
 
@@ -425,6 +433,55 @@ elif tool == "curl" and "--output" in args:
             "validate_gpu_directory() { return 0; }; lan_address_is_assigned() { return 0; }; main"
         ))
         self.assertFalse(any(call[:3] == ["kind", "create", "cluster"] for call in self.calls()))
+
+    def gateway_probes(self):
+        return [
+            call[call.index("--header") + 1].removeprefix("Host: ")
+            for call in self.calls() if call[0] == "curl" and "--header" in call
+        ]
+
+    def test_apps_mode_waits_for_demand_controller_not_llm_or_chat(self):
+        self.target.write_bytes(PAYLOAD)
+        result = self.run_bootstrap()
+        self.assert_success(result)
+        calls = self.calls()
+        self.assertIn(
+            ["kubectl", "--context", "kind-homelab-dev", "--namespace", "llm",
+             "rollout", "status", "deployment/llm-demand", "--timeout=5m"],
+            calls,
+        )
+        # Routes are still checked even though their backends are stopped.
+        for namespace, route in (("llm", "httproute/llm"), ("chat", "httproute/open-webui")):
+            self.assertTrue(any(
+                call[:6] == ["kubectl", "--context", "kind-homelab-dev", "--namespace", namespace, "wait"]
+                and route in call for call in calls
+            ), route)
+        self.assertEqual(self.gateway_probes(), ["grafana.localhost", "argocd.localhost"])
+        self.assertIn("apps mode", result.stdout)
+
+    def test_llm_mode_also_waits_for_llm_and_chat(self):
+        self.target.write_bytes(PAYLOAD)
+        self.env["LAB_MODE"] = "llm"
+        self.env["LAN_PORT_MAPPING"] = "192.168.1.50:443"
+        self.env["EXISTING_CLUSTER"] = "true"
+        result = self.run_bootstrap()
+        self.assert_success(result)
+        self.assertEqual(
+            self.gateway_probes(),
+            ["grafana.localhost", "argocd.localhost", "llm.localhost", "chat.localhost"],
+        )
+        self.assertTrue(any(
+            call[0] == "curl" and "chat.lab.internal:443:192.168.1.50" in call for call in self.calls()
+        ))
+        self.assertIn("llm mode", result.stdout)
+        self.assertIn("http://chat.localhost:8080", result.stdout)
+
+    def test_unknown_lab_mode_is_treated_as_apps(self):
+        self.env["LAB_MODE"] = "chat"
+        result = self.run_bootstrap("current_lab_mode")
+        self.assert_success(result)
+        self.assertEqual(result.stdout.strip(), "apps")
+
 
 if __name__ == "__main__":
     unittest.main()
