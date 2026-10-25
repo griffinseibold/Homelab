@@ -23,7 +23,7 @@ import subprocess
 import sys
 
 CLUSTER = "homelab-dev"
-CONTEXT = f"kind-{CLUSTER}"
+CONTEXT = CLUSTER  # The k3s kubeconfig context (ansible/roles/k3s).
 STORAGE_NAMESPACE = "ml-storage"
 GARAGE = "deployment/garage"
 SECRET = "s3-credentials"

@@ -165,7 +165,7 @@ class LabModeTests(unittest.TestCase):
         with patch.object(lab, "output", return_value="") as output:
             REAL_KUBECTL("get", "pods")
         args = output.call_args.args
-        self.assertEqual(args[:3], ("kubectl", "--context", "kind-homelab-dev"))
+        self.assertEqual(args[:3], ("kubectl", "--context", "homelab-dev"))
         self.assertLess(args.index("--context"), args.index("get"))
 
     def test_llm_mode_pauses_apps_stops_their_workloads_and_sets_mode(self):

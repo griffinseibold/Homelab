@@ -27,10 +27,8 @@ class BootstrapTests(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.repo = self.directory / "repo"
         (self.repo / "scripts").mkdir(parents=True)
-        (self.repo / "kubernetes/kind").mkdir(parents=True)
         shutil.copy2(ROOT / "scripts/bootstrap-dev.sh", self.repo / "scripts")
         shutil.copy2(ROOT / "scripts/download-models.sh", self.repo / "scripts")
-        shutil.copy2(ROOT / "kubernetes/kind/dev.yaml", self.repo / "kubernetes/kind")
         # ml-credentials.py has its own tests; here it only records that
         # bootstrap ran it, and with which arguments.
         credentials = self.repo / "scripts/ml-credentials.py"
@@ -54,7 +52,6 @@ class BootstrapTests(unittest.TestCase):
         self.target = self.models / MODEL_NAME
         self.partial = self.models / (MODEL_NAME + ".partial")
         self.log = self.directory / "calls.jsonl"
-        self.rendered = self.directory / "rendered.yaml"
         self.binary = self.directory / "bin"
         self.binary.mkdir()
         mock = self.binary / "mock"
@@ -69,28 +66,21 @@ import sys
 tool, args = Path(sys.argv[0]).name, sys.argv[1:]
 with open(os.environ["MOCK_LOG"], "a") as log:
     log.write(json.dumps([tool, *args]) + "\n")
-if tool == "kind":
-    if args[:2] == ["get", "clusters"]:
-        if os.environ.get("CLUSTER_LIST_FAILS") == "true":
+if tool == "docker":
+    if args[:2] == ["inspect", "--format"]:
+        if os.environ.get("KIND_RUNNING") != "true":
             raise SystemExit(1)
-        if os.environ.get("EXISTING_CLUSTER") == "true":
-            print("homelab-dev")
-    elif args[:2] == ["get", "nodes"]:
-        print("homelab-dev-control-plane\nhomelab-dev-worker")
-    elif args[:2] == ["create", "cluster"]:
-        Path(os.environ["RENDERED_CONFIG"]).write_text(Path(args[args.index("--config") + 1]).read_text())
-        if os.environ.get("CLUSTER_CREATE_FAILS") == "true":
-            raise SystemExit(1)
-elif tool == "docker":
-    if args[0] == "inspect":
-        print(os.environ["INSPECT_JSON"])
-    elif args[0] == "port":
-        if args[2:] == ["30443/tcp"]:
-            if not os.environ.get("LAN_PORT_MAPPING"):
-                raise SystemExit(1)
-            print(os.environ["LAN_PORT_MAPPING"])
-        else:
-            print("127.0.0.1:8080")
+        print("true")
+elif tool == "kubectl" and args[:2] == ["config", "get-contexts"]:
+    if os.environ.get("NO_CONTEXT") == "true":
+        raise SystemExit(1)
+elif tool == "kubectl" and "--raw" in args:
+    if os.environ.get("CLUSTER_DOWN") == "true":
+        raise SystemExit(1)
+elif tool == "kubectl" and "configmap" in args and "homelab-host" in args and "get" in args:
+    print(os.environ.get("PUBLISHED_LAN", ""), end="")
+elif tool == "kubectl" and "allocatable" in " ".join(args):
+    print(os.environ.get("GPU_ALLOCATABLE", "1"), end="")
 elif tool == "kubectl" and "apply" in args and "-" in args:
     # Record what was applied from standard input, to check that secrets
     # arrive through stdin rather than the command line.
@@ -117,31 +107,19 @@ elif tool == "curl" and "--output" in args:
 '''
         )
         mock.chmod(0o755)
-        for tool in ("curl", "docker", "kind", "kubectl", "flux"):
+        for tool in ("curl", "docker", "kubectl", "flux"):
             (self.binary / tool).symlink_to(mock)
-        self.nodes = [
-            {"Name": "/homelab-dev-control-plane", "Config": {"Labels": {"io.x-k8s.kind.role": "control-plane"}}},
-            {
-                "Name": "/homelab-dev-worker",
-                "Config": {"Labels": {"io.x-k8s.kind.role": "worker"}},
-                "Mounts": [
-                    {"Type": "bind", "Source": str(self.models), "Destination": "/models", "RW": False},
-                    {"Type": "bind", "Source": "/dev/dri", "Destination": "/dev/dri", "RW": True},
-                ],
-            },
-        ]
         self.env = dict(
             os.environ,
             PATH=f"{self.binary}:{os.environ['PATH']}",
             MODELS_DIR=str(self.models),
             MOCK_LOG=str(self.log),
-            RENDERED_CONFIG=str(self.rendered),
-            INSPECT_JSON=json.dumps(self.nodes),
             LAB_CA_DIR=str(self.directory / "lab-ca"),
             ML_STORAGE_DIR=str(self.directory / "ml-storage"),
         )
         self.env.pop("LAN_ADDRESS", None)
         self.env.pop("LAB_MODE", None)
+        self.env.pop("KIND_RUNNING", None)
         self.lab_ca = self.directory / "lab-ca"
         self.ml_storage = self.directory / "ml-storage"
 
@@ -154,9 +132,12 @@ elif tool == "curl" and "--output" in args:
             env=self.env, text=True, capture_output=True, check=False,
         )
 
-    def run_bootstrap(self, command="validate_gpu_directory() { return 0; }; main"):
-        # GPU character-device validation is tested separately; a real GPU
-        # must never be required by these bootstrap orchestration tests.
+    HOST = ("validate_gpu_directory() { return 0; }; "
+            "host_settings() { printf 'MODELS_UID=1000\\nMODELS_GID=1000\\nRENDER_GID=992\\nVIDEO_GID=44\\n'; }; ")
+
+    def run_bootstrap(self, command=HOST + "main"):
+        # GPU character-device validation and host IDs are tested separately;
+        # a real GPU must never be required by these orchestration tests.
         return subprocess.run(
             ["bash", "-c", 'source "$1"; ' + command, "test", str(self.repo / "scripts/bootstrap-dev.sh")],
             env=self.env, text=True, capture_output=True, check=False,
@@ -244,90 +225,95 @@ elif tool == "curl" and "--output" in args:
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.calls(), [])
 
-    def test_gpu_validation_requires_a_character_device(self):
+    def test_gpu_validation_requires_kfd_and_a_render_character_device(self):
         gpu = self.directory / "dri"
         gpu.mkdir()
         (gpu / "renderD128").write_text("ordinary file")
         self.env["TEST_GPU_DIR"] = str(gpu)
-        result = self.run_bootstrap('validate_gpu_directory "$TEST_GPU_DIR"')
+        self.env["TEST_KFD"] = "/dev/null"  # Any character device.
+        check = 'validate_gpu_directory "$TEST_GPU_DIR" "$TEST_KFD"'
+        result = self.run_bootstrap(check)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("No GPU render device", result.stderr)
         (gpu / "renderD128").unlink()
         (gpu / "renderD128").symlink_to("/dev/null")
-        self.assert_success(self.run_bootstrap('validate_gpu_directory "$TEST_GPU_DIR"'))
+        self.assert_success(self.run_bootstrap(check))
+        self.env["TEST_KFD"] = str(self.directory / "missing-kfd")
+        result = self.run_bootstrap(check)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing-kfd is missing", result.stderr)
 
-    def test_rendering_quotes_paths_without_evaluating_them(self):
-        unusual = '/tmp/space "quotes" \\ backslash\nnewline $(touch nope)'
-        self.env["MODELS_DIR"] = unusual
-        result = self.run_bootstrap('render_cluster_config "$RENDERED_CONFIG"')
+    def test_models_directory_must_be_safe_to_substitute(self):
+        for path in ("relative/models", '/tmp/a"b', "/tmp/a$b", "/tmp/a\\b", "/tmp/a\nb"):
+            with self.subTest(path=path):
+                self.env["MODELS_DIR"] = path
+                self.assertNotEqual(self.run_bootstrap("validate_models_dir").returncode, 0)
+        self.env["MODELS_DIR"] = "/home/user/model weights"
+        self.assert_success(self.run_bootstrap("validate_models_dir"))
+
+    def test_host_settings_report_owner_and_gpu_groups(self):
+        fake = ('stat() { [[ "$2" == %u ]] && echo 1000 || echo 1001; }; '
+                'getent() { [[ "$2" == render ]] && echo render:x:992: || echo video:x:44:; }; ')
+        result = self.run_bootstrap(fake + "host_settings")
         self.assert_success(result)
-        model_paths = [
-            json.loads(line.split("hostPath:", 1)[1].strip())
-            for line in self.rendered.read_text().splitlines()
-            if "hostPath:" in line and '"' in line
-        ]
-        self.assertEqual(model_paths, [unusual, unusual])
-        self.assertIn('listenAddress: "127.0.0.1"', self.lan_mapping())
+        self.assertEqual(result.stdout.split(),
+                         ["MODELS_UID=1000", "MODELS_GID=1001", "RENDER_GID=992", "VIDEO_GID=44"])
+        result = self.run_bootstrap('stat() { echo 1000; }; getent() { :; }; host_settings')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no render or video group", result.stderr)
 
-    def test_new_cluster_uses_selected_models_directory_and_labels_worker(self):
+    def test_root_owned_models_directory_is_refused(self):
+        result = self.run_bootstrap('stat() { echo 0; }; host_settings')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("owned by root", result.stderr)
+
+    def test_bootstrap_writes_host_configmap_for_flux(self):
         self.target.write_bytes(PAYLOAD)
         self.assert_success(self.run_bootstrap())
-        config = self.rendered.read_text()
-        self.assertIn(json.dumps(str(self.models)), config)
-        self.assertNotIn("__MODELS_DIR__", config)
-        self.assertIn(
-            ["kubectl", "--context", "kind-homelab-dev", "label", "node", "homelab-dev-worker", "homelab.local/llm-capable=true", "--overwrite"],
-            self.calls(),
-        )
+        create = self.host_configmap()
+        self.assertIn(f"--from-literal=MODELS_DIR={self.models}", create)
+        self.assertIn("--from-literal=RENDER_GID=992", create)
+        self.assertFalse(any(arg.startswith("--from-literal=LAN_ADDRESS") for arg in create))
+        self.assertEqual(create[create.index("--namespace") + 1], "flux-system")
 
-    def test_existing_compatible_cluster_is_preserved_and_labeled(self):
+    def test_running_kind_cluster_stops_bootstrap_before_cluster_changes(self):
         self.target.write_bytes(PAYLOAD)
-        self.env["EXISTING_CLUSTER"] = "true"
-        self.assert_success(self.run_bootstrap())
-        self.assertFalse(any(call[:3] == ["kind", "create", "cluster"] for call in self.calls()))
-        self.assertTrue(any("homelab.local/llm-capable=true" in call for call in self.calls()))
-
-    def test_cluster_listing_failure_does_not_attempt_creation(self):
-        self.target.write_bytes(PAYLOAD)
-        self.env["CLUSTER_LIST_FAILS"] = "true"
-        self.assertNotEqual(self.run_bootstrap().returncode, 0)
-        self.assertFalse(any(call[:2] == ["kind", "create"] for call in self.calls()))
-
-    def test_failed_creation_removes_temporary_configuration(self):
-        self.target.write_bytes(PAYLOAD)
-        self.env["CLUSTER_CREATE_FAILS"] = "true"
-        self.assertNotEqual(self.run_bootstrap().returncode, 0)
-        creation = next(call for call in self.calls() if call[:2] == ["kind", "create"])
-        self.assertFalse(Path(creation[creation.index("--config") + 1]).exists())
-
-    def test_incompatible_existing_cluster_fails_without_mutations(self):
-        self.target.write_bytes(PAYLOAD)
-        self.env["EXISTING_CLUSTER"] = "true"
-        self.nodes[1]["Mounts"][0]["Source"] = "/someone/elses/models"
-        self.env["INSPECT_JSON"] = json.dumps(self.nodes)
+        self.env["KIND_RUNNING"] = "true"
         result = self.run_bootstrap()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("cluster has been preserved", result.stderr)
+        self.assertIn("migrate-to-k3s.md", result.stderr)
         self.assertFalse(any(call[0] in ("kubectl", "flux") for call in self.calls()))
-        self.assertFalse(any(call[:2] in (["kind", "create"], ["kind", "delete"]) for call in self.calls()))
 
-    def test_missing_gpu_mount_and_writable_model_mount_are_rejected(self):
-        for mounts in (
-            [self.nodes[1]["Mounts"][0]],
-            [{**self.nodes[1]["Mounts"][0], "RW": True}, self.nodes[1]["Mounts"][1]],
-        ):
-            with self.subTest(mounts=mounts):
-                nodes = [self.nodes[0], {**self.nodes[1], "Mounts": mounts}]
-                self.env["INSPECT_JSON"] = json.dumps(nodes)
-                result = self.run_bootstrap("validate_cluster_mounts")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("incompatible", result.stderr)
-
-    def test_cluster_without_workers_is_rejected(self):
-        self.env["INSPECT_JSON"] = json.dumps(self.nodes[:1])
-        result = self.run_bootstrap("validate_cluster_mounts")
+    def test_missing_k3s_context_points_to_host_bootstrap(self):
+        self.target.write_bytes(PAYLOAD)
+        self.env["NO_CONTEXT"] = "true"
+        result = self.run_bootstrap()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("no worker nodes", result.stderr)
+        self.assertIn("bootstrap-host.sh", result.stderr)
+        self.assertFalse(any(call[0] == "flux" for call in self.calls()))
+
+    def test_unreachable_cluster_is_reported(self):
+        self.target.write_bytes(PAYLOAD)
+        self.env["CLUSTER_DOWN"] = "true"
+        result = self.run_bootstrap()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("systemctl status k3s", result.stderr)
+
+    def test_bootstrap_waits_for_the_gpu_resource_after_the_gpu_kustomization(self):
+        self.target.write_bytes(PAYLOAD)
+        self.assert_success(self.run_bootstrap())
+        calls = self.calls()
+        gpu = next(i for i, c in enumerate(calls) if c[:4] == ["flux", "reconcile", "kustomization", "gpu"])
+        llm = next(i for i, c in enumerate(calls) if c[:4] == ["flux", "reconcile", "kustomization", "llm"])
+        allocatable = next(i for i, c in enumerate(calls) if "allocatable" in " ".join(c))
+        self.assertLess(gpu, allocatable)
+        self.assertLess(allocatable, llm)
+
+    def test_missing_gpu_resource_times_out_with_a_hint(self):
+        self.env["GPU_ALLOCATABLE"] = ""
+        result = self.run_bootstrap("sleep() { :; }; wait_for_gpu_resource 0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("amdgpu-device-plugin", result.stderr)
 
     def test_lab_ca_is_created_once_and_constrained_to_lab_names(self):
         self.assert_success(self.run_bootstrap("ensure_lab_ca"))
@@ -369,12 +355,14 @@ elif tool == "curl" and "--output" in args:
 
     def test_lan_address_must_be_a_private_ipv4_address_on_this_host(self):
         assigned = "lan_address_is_assigned() { return 0; }; validate_lan_address"
-        for address in ("8.8.8.8", "100.64.0.1", "127.0.0.1", "fe80::1", "192.168.1"):
+        for address in ("8.8.8.8", "100.64.0.1", "127.0.0.1", "fe80::1", "192.168.1", "on"):
             with self.subTest(address=address):
                 self.env["LAN_ADDRESS"] = address
                 self.assertNotEqual(self.run_bootstrap(assigned).returncode, 0)
+        for address in ("192.168.1.50", "off"):
+            self.env["LAN_ADDRESS"] = address
+            self.assert_success(self.run_bootstrap(assigned))
         self.env["LAN_ADDRESS"] = "192.168.1.50"
-        self.assert_success(self.run_bootstrap(assigned))
         result = self.run_bootstrap("lan_address_is_assigned() { return 1; }; validate_lan_address")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not assigned to this host", result.stderr)
@@ -386,20 +374,15 @@ elif tool == "curl" and "--output" in args:
         self.assertEqual(self.calls(), [])
         self.assertFalse(self.lab_ca.exists())
 
-    def lan_mapping(self):
-        lines = self.rendered.read_text().splitlines()
-        start = next(i for i, line in enumerate(lines) if "containerPort: 30443" in line)
-        return "\n".join(lines[start:start + 4])
+    def host_configmap(self):
+        return next(call for call in self.calls() if "configmap" in call and "homelab-host" in call
+                    and "create" in call)
 
-    def test_new_cluster_publishes_https_only_on_lan_address(self):
+    def test_lan_address_is_published_and_probed(self):
         self.target.write_bytes(PAYLOAD)
         self.env["LAN_ADDRESS"] = "192.168.1.50"
-        self.assert_success(self.run_bootstrap(
-            "validate_gpu_directory() { return 0; }; lan_address_is_assigned() { return 0; }; main"
-        ))
-        self.assertIn("hostPort: 443", self.lan_mapping())
-        self.assertIn('listenAddress: "192.168.1.50"', self.lan_mapping())
-        self.assertNotIn("__LAN_ADDRESS__", self.rendered.read_text())
+        self.assert_success(self.run_bootstrap(self.HOST + "lan_address_is_assigned() { return 0; }; main"))
+        self.assertIn("--from-literal=LAN_ADDRESS=192.168.1.50", self.host_configmap())
         self.assertTrue(any(
             call[0] == "curl" and "grafana.lab.internal:443:192.168.1.50" in call for call in self.calls()
         ))
@@ -408,49 +391,43 @@ elif tool == "curl" and "--output" in args:
             call[0] == "curl" and "chat.lab.internal:443:192.168.1.50" in call for call in self.calls()
         ))
 
-    def test_new_cluster_without_lan_address_keeps_https_on_loopback(self):
+    def test_without_lan_address_https_stays_on_loopback(self):
         self.target.write_bytes(PAYLOAD)
         self.assert_success(self.run_bootstrap())
-        self.assertIn('listenAddress: "127.0.0.1"', self.lan_mapping())
+        self.assertFalse(any(arg.startswith("--from-literal=LAN_ADDRESS") for arg in self.host_configmap()))
         self.assertFalse(any(call[0] == "curl" and "--resolve" in call for call in self.calls()))
         secret = next(call for call in self.calls() if "secret" in call and "lab-ca" in call)
         self.assertIn(f"--cert={self.lab_ca / 'ca.crt'}", secret)
         self.assertIn(f"--key={self.lab_ca / 'ca.key'}", secret)
 
-    def test_existing_cluster_keeps_its_lan_address_without_lan_address_set(self):
+    def test_published_lan_address_is_kept_without_lan_address_set(self):
         self.target.write_bytes(PAYLOAD)
-        self.env["EXISTING_CLUSTER"] = "true"
-        self.env["LAN_PORT_MAPPING"] = "192.168.1.50:443"
-        self.assert_success(self.run_bootstrap())
-        self.assertTrue(any(
-            call[0] == "curl" and "grafana.lab.internal:443:192.168.1.50" in call for call in self.calls()
-        ))
+        self.env["PUBLISHED_LAN"] = "192.168.1.50"
+        self.assert_success(self.run_bootstrap(self.HOST + "lan_address_is_assigned() { return 0; }; main"))
+        self.assertIn("--from-literal=LAN_ADDRESS=192.168.1.50", self.host_configmap())
 
-    def test_existing_cluster_with_other_lan_address_fails_without_mutations(self):
+    def test_published_lan_address_no_longer_on_this_host_stops_bootstrap(self):
         self.target.write_bytes(PAYLOAD)
-        self.env["EXISTING_CLUSTER"] = "true"
-        self.env["LAN_ADDRESS"] = "192.168.1.50"
-        for mapping in ("", "127.0.0.1:443", "192.168.1.60:443"):
-            with self.subTest(mapping=mapping):
-                self.log.unlink(missing_ok=True)
-                self.env["LAN_PORT_MAPPING"] = mapping
-                result = self.run_bootstrap(
-                    "validate_gpu_directory() { return 0; }; lan_address_is_assigned() { return 0; }; main"
-                )
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("cluster has been preserved", result.stderr)
-                self.assertFalse(any(call[0] in ("kubectl", "flux") for call in self.calls()))
-                self.assertFalse(any(call[:2] in (["kind", "create"], ["kind", "delete"]) for call in self.calls()))
+        self.env["PUBLISHED_LAN"] = "192.168.1.50"
+        result = self.run_bootstrap(self.HOST + "lan_address_is_assigned() { return 1; }; main")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no longer assigned", result.stderr)
+        self.assertFalse(any(call[0] == "flux" for call in self.calls()))
 
-    def test_existing_cluster_with_matching_lan_address_is_reused(self):
+    def test_lan_address_can_change_or_be_turned_off(self):
         self.target.write_bytes(PAYLOAD)
-        self.env["EXISTING_CLUSTER"] = "true"
-        self.env["LAN_ADDRESS"] = "192.168.1.50"
-        self.env["LAN_PORT_MAPPING"] = "192.168.1.50:443"
-        self.assert_success(self.run_bootstrap(
-            "validate_gpu_directory() { return 0; }; lan_address_is_assigned() { return 0; }; main"
-        ))
-        self.assertFalse(any(call[:3] == ["kind", "create", "cluster"] for call in self.calls()))
+        self.env["PUBLISHED_LAN"] = "192.168.1.50"
+        self.env["LAN_ADDRESS"] = "192.168.1.60"
+        result = self.run_bootstrap(self.HOST + "lan_address_is_assigned() { return 0; }; main")
+        self.assert_success(result)
+        self.assertIn("192.168.1.50 -> 192.168.1.60", result.stdout)
+        self.assertIn("--from-literal=LAN_ADDRESS=192.168.1.60", self.host_configmap())
+        self.log.unlink()
+        self.env["LAN_ADDRESS"] = "off"
+        result = self.run_bootstrap()
+        self.assert_success(result)
+        self.assertIn("192.168.1.50 -> off", result.stdout)
+        self.assertFalse(any(arg.startswith("--from-literal=LAN_ADDRESS") for arg in self.host_configmap()))
 
     def gateway_probes(self):
         return [
@@ -464,14 +441,14 @@ elif tool == "curl" and "--output" in args:
         self.assert_success(result)
         calls = self.calls()
         self.assertIn(
-            ["kubectl", "--context", "kind-homelab-dev", "--namespace", "llm",
+            ["kubectl", "--context", "homelab-dev", "--namespace", "llm",
              "rollout", "status", "deployment/llm-demand", "--timeout=5m"],
             calls,
         )
         # Routes are still checked even though their backends are stopped.
         for namespace, route in (("llm", "httproute/llm"), ("chat", "httproute/open-webui")):
             self.assertTrue(any(
-                call[:6] == ["kubectl", "--context", "kind-homelab-dev", "--namespace", namespace, "wait"]
+                call[:6] == ["kubectl", "--context", "homelab-dev", "--namespace", namespace, "wait"]
                 and route in call for call in calls
             ), route)
         self.assertEqual(self.gateway_probes(), ["grafana.localhost", "argocd.localhost", "mlflow.localhost"])
@@ -480,9 +457,8 @@ elif tool == "curl" and "--output" in args:
     def test_llm_mode_also_waits_for_llm_and_chat(self):
         self.target.write_bytes(PAYLOAD)
         self.env["LAB_MODE"] = "llm"
-        self.env["LAN_PORT_MAPPING"] = "192.168.1.50:443"
-        self.env["EXISTING_CLUSTER"] = "true"
-        result = self.run_bootstrap()
+        self.env["PUBLISHED_LAN"] = "192.168.1.50"
+        result = self.run_bootstrap(self.HOST + "lan_address_is_assigned() { return 0; }; main")
         self.assert_success(result)
         self.assertEqual(
             self.gateway_probes(),
@@ -549,7 +525,7 @@ elif tool == "curl" and "--output" in args:
         self.assertLess(reconcile("ml-storage"), credentials)
         self.assertLess(credentials, reconcile("mlflow"))
         self.assertTrue((self.ml_storage / "rpc-secret").exists())
-        self.assertTrue(any(c[:6] == ["kubectl", "--context", "kind-homelab-dev", "--namespace", "mlflow", "wait"]
+        self.assertTrue(any(c[:6] == ["kubectl", "--context", "homelab-dev", "--namespace", "mlflow", "wait"]
                             and "httproute/mlflow" in c for c in calls))
         self.assertIn("http://mlflow.localhost:8080", result.stdout)
 

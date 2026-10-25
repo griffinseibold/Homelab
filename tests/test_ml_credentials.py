@@ -111,7 +111,7 @@ class MlCredentialsTests(unittest.TestCase):
             run.return_value.stdout = ""
             REAL_KUBECTL("get", "namespace", "x")
         args = run.call_args.args
-        self.assertEqual(args[:3], ("kubectl", "--context", "kind-homelab-dev"))
+        self.assertEqual(args[:3], ("kubectl", "--context", "homelab-dev"))
 
     def test_creates_key_grants_default_buckets_and_writes_secret(self):
         out = self.assert_ok("crosswalk")

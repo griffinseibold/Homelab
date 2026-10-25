@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Cold archive and empty-volume recovery for this repository's local Kind cluster."""
+"""Cold archive and empty-volume recovery for this repository's single-node k3s cluster.
+
+Volumes are k3s local-path directories on this host. While they are copied,
+every pod and k3s itself are frozen with the cgroup v2 freezer, the k3s
+equivalent of pausing the old Kind node containers: nothing runs, nothing is
+killed. Copies use sudo; the password is asked for before anything is frozen.
+"""
 
 import argparse
 from contextlib import contextmanager
@@ -12,6 +18,7 @@ import re
 import json
 import os
 from pathlib import Path, PurePosixPath
+import shlex
 import signal
 import subprocess
 import sys
@@ -19,7 +26,20 @@ import tarfile
 import tempfile
 
 CLUSTER = "homelab-dev"
-CONTEXT = f"kind-{CLUSTER}"
+CONTEXT = CLUSTER  # The k3s kubeconfig context (ansible/roles/k3s).
+STORAGE_CLASS = "local-path"
+# k3s's local-path provisioner keeps every volume under this directory.
+STORAGE_ROOT = "/var/lib/rancher/k3s/storage/"
+# Copies and freezing need root; -n never prompts once the cluster is frozen
+# (credentials are refreshed with `sudo -v` before freezing).
+SUDO = ("sudo", "-n")
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+# Pods live under kubepods.slice (systemd cgroup driver) or kubepods
+# (cgroupfs driver). k3s's own processes, including the kubelet and
+# containerd, are in its service cgroup; freezing it too keeps the kubelet
+# from failing probes and restarting frozen containers.
+POD_CGROUPS = ("kubepods.slice", "kubepods")
+K3S_CGROUP = "system.slice/k3s.service"
 
 
 def run(*args, **kwargs):
@@ -37,16 +57,34 @@ def get(resource, namespace=None):
 
 
 def nodes():
-    names = output("kind", "get", "nodes", "--name", CLUSTER).split()
-    if not names:
-        raise ValueError(f"Kind cluster {CLUSTER} does not exist")
-    states = json.loads(output("docker", "inspect", *names))
-    for state in states:
-        if state["Config"]["Labels"].get("io.x-k8s.kind.cluster") != CLUSTER:
-            raise ValueError("Refusing a container outside the dev cluster")
-        if not state["State"]["Running"] or state["State"]["Paused"]:
-            raise ValueError("All dev nodes must be running and unpaused")
+    names = [node["metadata"]["name"] for node in get("nodes")]
+    if len(names) != 1:
+        # Volumes are read from this host's disk, so they must all be local.
+        raise ValueError(f"Expected the single-node k3s cluster; found {len(names)} node(s)")
     return names
+
+
+def freezer_cgroups(root=CGROUP_ROOT):
+    """The cgroups to freeze: the pods' parent cgroup, then k3s itself."""
+    pods = [root / name for name in POD_CGROUPS if (root / name / "cgroup.freeze").exists()]
+    k3s = root / K3S_CGROUP
+    if len(pods) != 1 or not (k3s / "cgroup.freeze").exists():
+        raise ValueError("Could not find the k3s pod and service cgroups to freeze "
+                         f"(cgroup v2 with {' or '.join(POD_CGROUPS)} and {K3S_CGROUP})")
+    return [pods[0], k3s]
+
+
+def privileged(*args, **kwargs):
+    return run(*SUDO, *args, **kwargs)
+
+
+def set_frozen(cgroup, frozen):
+    privileged("sh", "-c", f'echo {int(frozen)} > {shlex.quote(str(cgroup / "cgroup.freeze"))}',
+               stdout=subprocess.DEVNULL, timeout=30)
+
+
+def is_frozen(cgroup):
+    return (cgroup / "cgroup.freeze").read_text().strip() == "1"
 
 
 @contextmanager
@@ -62,31 +100,30 @@ def operation_lock():
 
 
 @contextmanager
-def paused(names):
-    # Record before calling Docker: an interrupted client may have paused the
-    # node even when it did not receive the successful daemon response.
+def paused(cgroups):
+    # Record before writing: an interrupted write may still have frozen it.
     attempted = []
     try:
-        for name in names:
-            attempted.append(name)
-            run("docker", "pause", name, stdout=subprocess.DEVNULL, timeout=30)
+        for cgroup in cgroups:
+            attempted.append(cgroup)
+            set_frozen(cgroup, True)
         yield
     finally:
-        # A second Ctrl-C must not strand nodes during cleanup.
+        # A second Ctrl-C must not leave the cluster frozen.
         handlers = {sig: signal.signal(sig, signal.SIG_IGN)
                     for sig in (signal.SIGINT, signal.SIGTERM)}
         failures = []
-        for name in reversed(attempted):
+        for cgroup in reversed(attempted):
             try:
-                state = json.loads(output("docker", "inspect", name))[0]["State"]
-                if state["Paused"]:
-                    run("docker", "unpause", name, stdout=subprocess.DEVNULL, timeout=30)
-            except (subprocess.SubprocessError, OSError, KeyError, ValueError, IndexError, TypeError):
-                failures.append(name)
+                if is_frozen(cgroup):
+                    set_frozen(cgroup, False)
+            except (subprocess.SubprocessError, OSError, ValueError):
+                failures.append(cgroup)
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
         if failures:
-            raise RuntimeError("Could not resume nodes; run: docker unpause " + " ".join(failures))
+            raise RuntimeError("Could not resume the cluster; run: "
+                               + "; ".join(f"echo 0 | sudo tee {c / 'cgroup.freeze'}" for c in failures))
 
 
 def volume_inventory(names, only_claim=None):
@@ -107,12 +144,12 @@ def volume_inventory(names, only_claim=None):
                 if expr["key"] == "kubernetes.io/hostname" and expr["operator"] == "In":
                     hosts.update(expr["values"])
         path = spec.get("hostPath", spec.get("local", {})).get("path", "")
-        if (spec.get("storageClassName") != "standard"
+        if (spec.get("storageClassName") != STORAGE_CLASS
                 or spec.get("volumeMode", "Filesystem") != "Filesystem"
                 or len(hosts) != 1 or not hosts.issubset(names)
-                or not path.startswith("/var/local-path-provisioner/")
+                or not path.startswith(STORAGE_ROOT) or len(PurePosixPath(path).parts) < 7
                 or ".." in PurePosixPath(path).parts):
-            raise ValueError(f"Unsupported volume {ns}/{name}; expected a Kind local-path filesystem PVC")
+            raise ValueError(f"Unsupported volume {ns}/{name}; expected a k3s local-path filesystem PVC")
         volumes.append({"namespace": ns, "claim": name, "node": hosts.pop(),
                         "path": path, "capacity": pvc["status"]["capacity"]["storage"],
                         "archive": hashlib.sha256(f"{ns}/{name}".encode()).hexdigest() + ".tar"})
@@ -161,8 +198,17 @@ def write_json(path, value):
 
 
 def archive_volume(volume, destination):
+    # Members are relative to the volume ("." and "./file"), the same layout
+    # as the Kind-era `docker cp` archives, so both restore the same way.
     with destination.open("wb") as handle:
-        run("docker", "cp", f'{volume["node"]}:{volume["path"]}/.', "-", stdout=handle)
+        privileged("tar", "--create", "--file=-", "--numeric-owner", "--xattrs", "--acls",
+                   f'--directory={volume["path"]}', ".", stdout=handle)
+
+
+def extract_volume(archive, volume):
+    with archive.open("rb") as handle:
+        privileged("tar", "--extract", "--file=-", "--numeric-owner", "--same-permissions",
+                   "--same-owner", "--xattrs", "--acls", f'--directory={volume["path"]}', stdin=handle)
 
 
 def check_tar(path, empty=False):
@@ -252,11 +298,13 @@ def create(directory):
     volumes = volume_inventory(cluster_nodes)
     argo = registrations()
     mode = lab_mode()
+    cgroups = freezer_cgroups()
+    run("sudo", "-v")  # Ask for the password now, not while frozen.
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
     (directory / ".incomplete").touch()
     write_json(directory / "argocd.json", argo)
-    print(f"Pausing {len(cluster_nodes)} nodes while archiving {len(volumes)} volumes...", flush=True)
-    with paused(cluster_nodes):
+    print(f"Freezing the cluster while archiving {len(volumes)} volumes...", flush=True)
+    with paused(cgroups):
         for volume in volumes:
             print(f'Archiving {volume["namespace"]}/{volume["claim"]}', flush=True)
             archive_volume(volume, directory / volume["archive"])
@@ -265,7 +313,7 @@ def create(directory):
     for volume in volumes:
         check_tar(directory / volume["archive"])
     write_json(directory / "manifest.json", {
-        "version": 1, "cluster": CLUSTER,
+        "version": 1, "cluster": CLUSTER, "platform": "k3s",
         "created_at": datetime.now(timezone.utc).isoformat(),
         # In llm mode the exported Applications are paused; their saved sync
         # policy stays in an annotation for ./scripts/lab-mode.py apps.
@@ -314,15 +362,18 @@ def restore(directory, claim, target_claim):
     if storage_bytes(target["capacity"]) < storage_bytes(source["capacity"]):
         raise ValueError("Target PVC capacity is smaller than the original PVC")
     require_unused_volume(target)
+    cgroups = freezer_cgroups()
+    run("sudo", "-v")  # Ask for the password now, not while frozen.
     # All processes are frozen before checking emptiness to prevent a writer
     # racing the check. The temporary tar remains private and is deleted.
+    # Archives from the Kind-era script restore the same way: both hold the
+    # volume's contents relative to its root.
     with tempfile.TemporaryDirectory(prefix="homelab-restore-") as temporary:
-        with paused(cluster_nodes):
+        with paused(cgroups):
             current = Path(temporary) / "target.tar"
             archive_volume(target, current)
             check_tar(current, empty=True)
-            with (directory / source["archive"]).open("rb") as handle:
-                run("docker", "cp", "-a", "-", f'{target["node"]}:{target["path"]}', stdin=handle)
+            extract_volume(directory / source["archive"], target)
     print(f"Restored {claim} into {target_claim or claim}; verify the restored data before starting its workload.")
 
 
@@ -335,7 +386,7 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    create_parser = sub.add_parser("create", help="Pause dev nodes and save all PVCs plus Argo registrations")
+    create_parser = sub.add_parser("create", help="Freeze the cluster and save all PVCs plus Argo registrations")
     create_parser.add_argument("--output", type=Path, default=Path.home() / "homelab-backups" /
                                datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ"))
     verify_parser = sub.add_parser("verify", help="Check backup completeness, checksums and archive paths")

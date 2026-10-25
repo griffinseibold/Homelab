@@ -16,7 +16,7 @@ import sys
 import time
 
 CLUSTER = "homelab-dev"
-CONTEXT = f"kind-{CLUSTER}"
+CONTEXT = CLUSTER  # The k3s kubeconfig context (ansible/roles/k3s).
 MODE_NAMESPACE = "llm"
 MODE_CONFIGMAP = "lab-mode"
 MODES = ("apps", "llm")

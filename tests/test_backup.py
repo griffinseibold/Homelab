@@ -32,16 +32,20 @@ class BackupTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name) / "snapshot"
-        self.volume = {"namespace": "chat", "claim": "open-webui", "node": "worker",
-                       "path": "/var/local-path-provisioner/pvc-test", "capacity": "2Gi", "archive": "chat.tar"}
+        self.volume = {"namespace": "chat", "claim": "open-webui", "node": "host",
+                       "path": "/var/lib/rancher/k3s/storage/pvc-test_chat_open-webui",
+                       "capacity": "2Gi", "archive": "chat.tar"}
+        self.cgroups = [Path("/sys/fs/cgroup/kubepods.slice"), Path("/sys/fs/cgroup/system.slice/k3s.service")]
 
     def snapshot(self):
         def archive(_volume, destination):
             make_tar(destination, b"database and WAL fixture")
-        with patch.object(backup, "nodes", return_value=["worker"]), \
+        with patch.object(backup, "nodes", return_value=["host"]), \
              patch.object(backup, "volume_inventory", return_value=[self.volume]), \
              patch.object(backup, "registrations", return_value={"items": []}), \
              patch.object(backup, "lab_mode", return_value="llm"), \
+             patch.object(backup, "freezer_cgroups", return_value=self.cgroups), \
+             patch.object(backup, "run"), \
              patch.object(backup, "paused"), patch.object(backup, "archive_volume", side_effect=archive):
             backup.create(self.directory)
         return self.directory
@@ -51,7 +55,7 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(backup.get("pv"), [])
         args = output.call_args.args
         self.assertLess(args.index("get"), args.index("-A"))
-        self.assertEqual(args[args.index("--context") + 1], "kind-homelab-dev")
+        self.assertEqual(args[args.index("--context") + 1], "homelab-dev")
 
     def test_lab_mode_is_recorded_and_defaults_to_apps(self):
         self.snapshot()
@@ -59,35 +63,67 @@ class BackupTests(unittest.TestCase):
         with patch.object(backup, "output", return_value="") as output:
             self.assertEqual(backup.lab_mode(), "apps")
         args = output.call_args.args
-        self.assertEqual(args[args.index("--context") + 1], "kind-homelab-dev")
+        self.assertEqual(args[args.index("--context") + 1], "homelab-dev")
         self.assertIn("--ignore-not-found", args)
         with patch.object(backup, "output", return_value='{"data": {"mode": "llm"}}'):
             self.assertEqual(backup.lab_mode(), "llm")
 
-    def test_create_verify_and_restore_preserve_bytes(self):
-        self.snapshot()
+    def restore_patches(self, existing=None):
+        """Patches for restore(); returns the list of (args, stdin bytes) of run calls."""
         calls = []
         def invoke(*args, **kwargs):
-            calls.append((args, kwargs["stdin"].read()))
-        with patch.object(backup, "nodes", return_value=["worker"]), \
-             patch.object(backup, "volume_inventory", return_value=[self.volume]), \
-             patch.object(backup, "paused"), patch.object(backup, "require_unused_volume"), \
-             patch.object(backup, "archive_volume", side_effect=lambda v, p: make_tar(p)), \
-             patch.object(backup, "run", side_effect=invoke):
+            stdin = kwargs.get("stdin")
+            calls.append((args, stdin.read() if stdin else None))
+        return calls, [
+            patch.object(backup, "nodes", return_value=["host"]),
+            patch.object(backup, "volume_inventory", return_value=[self.volume]),
+            patch.object(backup, "freezer_cgroups", return_value=self.cgroups),
+            patch.object(backup, "paused"), patch.object(backup, "require_unused_volume"),
+            patch.object(backup, "archive_volume", side_effect=lambda v, p: make_tar(p, existing)),
+            patch.object(backup, "run", side_effect=invoke),
+        ]
+
+    def test_create_verify_and_restore_preserve_bytes(self):
+        self.snapshot()
+        calls, patches = self.restore_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
             backup.restore(self.directory, "chat/open-webui", None)
-        self.assertEqual(calls[0][0], ("docker", "cp", "-a", "-", "worker:/var/local-path-provisioner/pvc-test"))
-        self.assertEqual(calls[0][1], (self.directory / "chat.tar").read_bytes())
+        self.assertEqual(calls[0][0], ("sudo", "-v"))
+        extract = calls[1]
+        self.assertEqual(extract[0][:4], ("sudo", "-n", "tar", "--extract"))
+        self.assertIn("--numeric-owner", extract[0])
+        self.assertIn("--same-owner", extract[0])
+        self.assertEqual(extract[0][-1], f'--directory={self.volume["path"]}')
+        self.assertEqual(extract[1], (self.directory / "chat.tar").read_bytes())
 
     def test_restore_refuses_occupied_destination_without_writes(self):
         self.snapshot()
-        with patch.object(backup, "nodes", return_value=["worker"]), \
-             patch.object(backup, "volume_inventory", return_value=[self.volume]), \
-             patch.object(backup, "paused"), patch.object(backup, "require_unused_volume"), \
-             patch.object(backup, "archive_volume", side_effect=lambda v, p: make_tar(p, b"existing")), \
-             patch.object(backup, "run") as run:
+        calls, patches = self.restore_patches(existing=b"existing")
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
             with self.assertRaisesRegex(ValueError, "not empty"):
                 backup.restore(self.directory, "chat/open-webui", None)
-            run.assert_not_called()
+        self.assertFalse(any("--extract" in args for args, _ in calls))
+
+    def test_archive_uses_root_tar_relative_to_the_volume(self):
+        with patch.object(backup, "run") as run:
+            backup.archive_volume(self.volume, Path(self.temp.name) / "out.tar")
+        args = run.call_args.args
+        self.assertEqual(args[:4], ("sudo", "-n", "tar", "--create"))
+        self.assertIn("--numeric-owner", args)
+        self.assertEqual(args[-2:], (f'--directory={self.volume["path"]}', "."))
+
+    def test_kind_era_backups_still_verify_and_restore(self):
+        # The Kind script wrote the same manifest without "platform"; its
+        # docker cp archives also hold paths relative to the volume root.
+        self.snapshot()
+        manifest = json.loads((self.directory / "manifest.json").read_text())
+        manifest.pop("platform")
+        manifest["volumes"][0]["path"] = "/var/local-path-provisioner/pvc-test"
+        backup.write_json(self.directory / "manifest.json", manifest)
+        calls, patches = self.restore_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            backup.restore(self.directory, "chat/open-webui", None)
+        self.assertTrue(any("--extract" in args for args, _ in calls))
 
     def test_corruption_and_incomplete_backups_rejected_before_cluster_access(self):
         self.snapshot()
@@ -101,7 +137,9 @@ class BackupTests(unittest.TestCase):
             backup.verified_snapshot(self.directory)
 
     def test_failed_copy_leaves_incomplete_backup(self):
-        with patch.object(backup, "nodes", return_value=["worker"]), \
+        with patch.object(backup, "nodes", return_value=["host"]), \
+             patch.object(backup, "freezer_cgroups", return_value=self.cgroups), \
+             patch.object(backup, "run"), \
              patch.object(backup, "volume_inventory", return_value=[self.volume]), \
              patch.object(backup, "registrations", return_value={"items": []}), \
              patch.object(backup, "lab_mode", return_value="apps"), \
@@ -174,33 +212,83 @@ class BackupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             backup.verified_snapshot(self.directory)
 
-    def test_pause_failure_resumes_every_node_it_may_have_paused(self):
-        calls = []
-        def invoke(*args, **kwargs):
-            calls.append(args)
-            if args == ("docker", "pause", "worker2"):
-                raise subprocess.CalledProcessError(1, args)
-        with patch.object(backup, "run", side_effect=invoke), \
-             patch.object(backup, "output", return_value='[{"State":{"Paused":true}}]'):
-            with self.assertRaises(subprocess.CalledProcessError):
-                with backup.paused(["worker", "worker2"]):
-                    self.fail("Should not enter after a failed pause")
-        self.assertIn(("docker", "unpause", "worker"), calls)
-        self.assertIn(("docker", "unpause", "worker2"), calls)
+    def frozen_tree(self):
+        root = Path(self.temp.name) / "cgroup"
+        for name in ("kubepods.slice", "system.slice/k3s.service"):
+            (root / name).mkdir(parents=True)
+            (root / name / "cgroup.freeze").write_text("0\n")
+        return root
 
-    def test_interrupt_during_copy_resumes_nodes(self):
-        with patch.object(backup, "run") as run, \
-             patch.object(backup, "output", return_value='[{"State":{"Paused":true}}]'):
+    def fake_freezer(self, fail_on=None):
+        """Stand-in for the sudo write: records calls and writes the file."""
+        calls = []
+        def set_frozen(cgroup, frozen):
+            calls.append((cgroup.name, frozen))
+            (cgroup / "cgroup.freeze").write_text(f"{int(frozen)}\n")
+            if fail_on == (cgroup.name, frozen):
+                raise subprocess.CalledProcessError(1, ["sudo"])
+        return calls, set_frozen
+
+    def test_freezer_finds_pod_and_k3s_cgroups_or_refuses(self):
+        root = self.frozen_tree()
+        self.assertEqual(backup.freezer_cgroups(root), [root / "kubepods.slice", root / "system.slice/k3s.service"])
+        (root / "system.slice/k3s.service/cgroup.freeze").unlink()
+        with self.assertRaisesRegex(ValueError, "cgroups to freeze"):
+            backup.freezer_cgroups(root)
+
+    def test_freeze_writes_through_sudo_without_a_prompt(self):
+        with patch.object(backup, "run") as run:
+            backup.set_frozen(Path("/sys/fs/cgroup/kubepods.slice"), True)
+        args = run.call_args.args
+        self.assertEqual(args[:2], ("sudo", "-n"))
+        self.assertIn("echo 1 > /sys/fs/cgroup/kubepods.slice/cgroup.freeze", args[-1])
+
+    def test_pause_failure_resumes_everything_it_may_have_frozen(self):
+        root = self.frozen_tree()
+        cgroups = backup.freezer_cgroups(root)
+        calls, set_frozen = self.fake_freezer(fail_on=("k3s.service", True))
+        with patch.object(backup, "set_frozen", side_effect=set_frozen):
+            with self.assertRaises(subprocess.CalledProcessError):
+                with backup.paused(cgroups):
+                    self.fail("Should not enter after a failed freeze")
+        self.assertIn(("kubepods.slice", False), calls)
+        self.assertIn(("k3s.service", False), calls)
+        self.assertTrue(all(not backup.is_frozen(c) for c in cgroups))
+
+    def test_interrupt_during_copy_resumes_the_cluster(self):
+        root = self.frozen_tree()
+        cgroups = backup.freezer_cgroups(root)
+        calls, set_frozen = self.fake_freezer()
+        with patch.object(backup, "set_frozen", side_effect=set_frozen):
             with self.assertRaises(KeyboardInterrupt):
-                with backup.paused(["worker"]):
+                with backup.paused(cgroups):
+                    self.assertTrue(all(backup.is_frozen(c) for c in cgroups))
                     raise KeyboardInterrupt()
-        self.assertEqual(run.call_args.args, ("docker", "unpause", "worker"))
+        # Pods resume after k3s, in reverse order of freezing.
+        self.assertEqual(calls[-2:], [("k3s.service", False), ("kubepods.slice", False)])
+        self.assertTrue(all(not backup.is_frozen(c) for c in cgroups))
+
+    def test_failed_resume_names_the_command_to_run(self):
+        root = self.frozen_tree()
+        cgroups = backup.freezer_cgroups(root)
+        calls, set_frozen = self.fake_freezer(fail_on=("kubepods.slice", False))
+        with patch.object(backup, "set_frozen", side_effect=set_frozen):
+            with self.assertRaisesRegex(RuntimeError, "sudo tee .*kubepods.slice/cgroup.freeze"):
+                with backup.paused(cgroups):
+                    pass
+
+    def test_only_a_single_node_cluster_is_accepted(self):
+        with patch.object(backup, "get", return_value=[{"metadata": {"name": "a"}}, {"metadata": {"name": "b"}}]):
+            with self.assertRaisesRegex(ValueError, "single-node"):
+                backup.nodes()
+        with patch.object(backup, "get", return_value=[{"metadata": {"name": "host"}}]):
+            self.assertEqual(backup.nodes(), ["host"])
 
     def test_restore_refuses_active_pod_before_pause(self):
         self.snapshot()
         pod = {"spec": {"volumes": [{"persistentVolumeClaim": {"claimName": "open-webui"}}]},
                "status": {"phase": "Running"}}
-        with patch.object(backup, "nodes", return_value=["worker"]), \
+        with patch.object(backup, "nodes", return_value=["host"]), \
              patch.object(backup, "volume_inventory", return_value=[self.volume]), \
              patch.object(backup, "get", return_value=[pod]), patch.object(backup, "paused") as paused:
             with self.assertRaisesRegex(ValueError, "used by a pod"):
@@ -210,7 +298,7 @@ class BackupTests(unittest.TestCase):
     def test_restore_refuses_smaller_pvc(self):
         self.snapshot()
         smaller = dict(self.volume, capacity="1Gi")
-        with patch.object(backup, "nodes", return_value=["worker"]), \
+        with patch.object(backup, "nodes", return_value=["host"]), \
              patch.object(backup, "volume_inventory", return_value=[smaller]), \
              patch.object(backup, "paused") as paused:
             with self.assertRaisesRegex(ValueError, "smaller"):
@@ -225,10 +313,10 @@ class BackupTests(unittest.TestCase):
                         self.fail("Concurrent operation admitted")
 
     def test_inventory_uses_unique_names_and_refuses_foreign_volumes(self):
-        pv = {"metadata": {"name": "pv"}, "spec": {"storageClassName": "standard",
-              "hostPath": {"path": "/var/local-path-provisioner/pvc-123"},
+        pv = {"metadata": {"name": "pv"}, "spec": {"storageClassName": "local-path",
+              "hostPath": {"path": "/var/lib/rancher/k3s/storage/pvc-123_a--b_c"},
               "nodeAffinity": {"required": {"nodeSelectorTerms": [{"matchExpressions": [
-                  {"key": "kubernetes.io/hostname", "operator": "In", "values": ["worker"]}]}]}}}}
+                  {"key": "kubernetes.io/hostname", "operator": "In", "values": ["host"]}]}]}}}}
         pvc = {"metadata": {"namespace": "a--b", "name": "c"}, "spec": {"volumeName": "pv"},
                "status": {"phase": "Bound", "capacity": {"storage": "2Gi"}}}
         other = copy.deepcopy(pvc)
@@ -236,10 +324,15 @@ class BackupTests(unittest.TestCase):
         def get(resource):
             return [pv] if resource == "pv" else [pvc, other]
         with patch.object(backup, "get", side_effect=get):
-            volumes = backup.volume_inventory(["worker"])
+            volumes = backup.volume_inventory(["host"])
             self.assertNotEqual(volumes[0]["archive"], volumes[1]["archive"])
             with self.assertRaisesRegex(ValueError, "Unsupported"):
-                backup.volume_inventory(["different-cluster-worker"])
+                backup.volume_inventory(["different-cluster-node"])
+            for path in ("/var/lib/rancher/k3s/storage", "/var/local-path-provisioner/pvc-123",
+                         "/var/lib/rancher/k3s/storage/../../../etc"):
+                pv["spec"]["hostPath"]["path"] = path
+                with self.subTest(path=path), self.assertRaisesRegex(ValueError, "Unsupported"):
+                    backup.volume_inventory(["host"])
 
 
 if __name__ == "__main__":

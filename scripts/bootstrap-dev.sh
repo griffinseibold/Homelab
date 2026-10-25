@@ -4,32 +4,37 @@ set -Eeuo pipefail
 shopt -s nullglob
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cluster_name="homelab-dev"
-cluster_context="kind-homelab-dev"
-cluster_config="${repository_root}/kubernetes/kind/dev.yaml"
-# Keep this outside main so the EXIT trap can read it after function unwinding.
-rendered_cluster_config=""
-gateway_node_port="30080"
-gateway_host_port="8080"
-lan_node_port="30443"
-lan_host_port="443"
+# The single-node k3s cluster installed by ./scripts/bootstrap-host.sh. Its
+# kubeconfig context is renamed from k3s's "default" to homelab-dev.
+cluster_context="homelab-dev"
+gateway_url="http://127.0.0.1:8080"
 models_dir="${MODELS_DIR:-${HOME}/models}"
-llm_node_label="homelab.local/llm-capable"
-# Home-network access is opt-in: a cluster created without LAN_ADDRESS keeps
-# the lan listener on loopback. The root certificate authority lives on the
-# host, outside Git and the cluster, so devices that trust it survive rebuilds.
-lan_address="${LAN_ADDRESS:-}"
+# Home-network access is opt-in: without LAN_ADDRESS the lan listener stays on
+# loopback. The address lives in the flux-system/homelab-host ConfigMap, so
+# later runs keep it; LAN_ADDRESS=off turns it off again. The root
+# certificate authority lives on the host, outside Git and the cluster, so
+# devices that trust it survive rebuilds.
+lan_request="${LAN_ADDRESS:-}"
+lan_address=""
 lab_domain="lab.internal"
 lab_ca_dir="${LAB_CA_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/homelab/lab-ca}"
 # Garage's RPC secret and admin token are generated once and kept on the host,
 # like the lab CA, so they never enter Git. S3 access keys are not kept here:
 # they live in Garage's own database (see scripts/ml-credentials.py).
 ml_storage_dir="${ML_STORAGE_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/homelab/ml-storage}"
+# The Kind cluster this replaces; it must not run beside k3s.
+kind_control_plane="homelab-dev-control-plane"
 
 validate_gpu_directory() {
   local gpu_directory="${1:-/dev/dri}"
+  local kfd_device="${2:-/dev/kfd}"
   local render_device
 
+  if [[ ! -c "${kfd_device}" ]]; then
+    echo "${kfd_device} is missing. AMD's device plugin needs it to advertise the GPU;" >&2
+    echo "./scripts/bootstrap-host.sh checks the amdgpu driver." >&2
+    return 1
+  fi
   for render_device in "${gpu_directory}"/renderD*; do
     if [[ -c "${render_device}" ]]; then
       return
@@ -41,42 +46,59 @@ validate_gpu_directory() {
   return 1
 }
 
-render_cluster_config() {
-  local output_path="$1"
-
-  # A JSON string is also a YAML quoted scalar. This preserves spaces,
-  # quotes, backslashes and other characters without evaluating the path.
-  python3 - "${cluster_config}" "${models_dir}" "${lan_address:-127.0.0.1}" "${output_path}" <<'PY'
-import json
-import pathlib
+# MODELS_DIR is substituted by Flux into a quoted YAML string in the LLM's
+# hostPath volume, so it must be an absolute path without characters that
+# would end or escape that string.
+validate_models_dir() {
+  python3 - "${models_dir}" <<'PY'
 import sys
 
-source, models_dir, lan_address, output = sys.argv[1:]
-config = pathlib.Path(source).read_text()
-for marker, count, value, description in (
-    ('"__MODELS_DIR__"', 2, models_dir, "two model directory placeholders"),
-    ('"__LAN_ADDRESS__"', 1, lan_address, "one LAN address placeholder"),
-):
-    if config.count(marker) != count:
-        raise SystemExit(f"Expected {description} in Kind configuration")
-    config = config.replace(marker, json.dumps(value))
-pathlib.Path(output).write_text(config)
+path = sys.argv[1]
+if not path.startswith("/"):
+    raise SystemExit(f"MODELS_DIR must be an absolute path; got {path!r}.")
+if any(character in path for character in '"\\$') or any(ord(c) < 32 or ord(c) == 127 for c in path):
+    raise SystemExit(f"MODELS_DIR {path!r} contains a quote, backslash, dollar sign or control "
+                     "character, which cannot be passed safely to the cluster. Move the models.")
 PY
 }
 
+# The LLM runs as the owner of the model directory (never root) and needs
+# the host's render and video group IDs for the GPU device nodes.
+host_settings() {
+  local models_uid models_gid render_gid video_gid
+
+  models_uid="$(stat -c %u "${models_dir}")"
+  models_gid="$(stat -c %g "${models_dir}")"
+  if [[ "${models_uid}" == "0" || "${models_gid}" == "0" ]]; then
+    echo "${models_dir} is owned by root; the LLM server runs as the directory's owner and never as root." >&2
+    echo "Give it to your user: sudo chown -R \"\$USER:\$USER\" ${models_dir}" >&2
+    return 1
+  fi
+  render_gid="$(getent group render | cut -d: -f3)"
+  video_gid="$(getent group video | cut -d: -f3)"
+  if [[ -z "${render_gid}" || -z "${video_gid}" ]]; then
+    echo "The host has no render or video group; GPU device permissions depend on them." >&2
+    return 1
+  fi
+  printf 'MODELS_UID=%s\nMODELS_GID=%s\nRENDER_GID=%s\nVIDEO_GID=%s\n' \
+    "${models_uid}" "${models_gid}" "${render_gid}" "${video_gid}"
+}
+
 validate_lan_address() {
-  if [[ -z "${lan_address}" ]]; then
+  local address="${1:-${lan_request}}"
+
+  if [[ -z "${address}" || "${address}" == "off" ]]; then
     return
   fi
 
-  python3 - "${lan_address}" <<'PY'
+  python3 - "${address}" <<'PY'
 import ipaddress
 import sys
 
 try:
     address = ipaddress.IPv4Address(sys.argv[1])
 except ValueError:
-    raise SystemExit(f"LAN_ADDRESS must be an IPv4 address; got {sys.argv[1]!r}.")
+    raise SystemExit(f"LAN_ADDRESS must be an IPv4 address or off; got {sys.argv[1]!r}.")
 private_networks = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 if not any(address in ipaddress.ip_network(network) for network in private_networks):
     raise SystemExit(
@@ -84,8 +106,8 @@ if not any(address in ipaddress.ip_network(network) for network in private_netwo
         "(10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16)."
     )
 PY
-  if ! lan_address_is_assigned "${lan_address}"; then
-    echo "LAN_ADDRESS ${lan_address} is not assigned to this host." >&2
+  if ! lan_address_is_assigned "${address}"; then
+    echo "LAN_ADDRESS ${address} is not assigned to this host." >&2
     echo "Check it with: ip -4 address" >&2
     return 1
   fi
@@ -93,6 +115,54 @@ PY
 
 lan_address_is_assigned() {
   python3 -c 'import socket, sys; socket.socket().bind((sys.argv[1], 0))' "$1" 2>/dev/null
+}
+
+# The address the cluster currently publishes the lan listener on, if any.
+published_lan_address() {
+  kubectl --context "${cluster_context}" --namespace flux-system \
+    get configmap homelab-host --ignore-not-found -o jsonpath='{.data.LAN_ADDRESS}'
+}
+
+resolve_lan_address() {
+  local published
+
+  published="$(published_lan_address)"
+  case "${lan_request}" in
+    "")
+      lan_address="${published}"
+      if [[ -n "${lan_address}" ]] && ! lan_address_is_assigned "${lan_address}"; then
+        echo "The cluster publishes home-network HTTPS on ${lan_address}, which is no longer assigned to this host." >&2
+        echo "Restore the router's DHCP reservation, or rerun with LAN_ADDRESS=<new address> or LAN_ADDRESS=off." >&2
+        return 1
+      fi
+      ;;
+    off) lan_address="" ;;
+    *) lan_address="${lan_request}" ;;
+  esac
+  if [[ "${lan_address}" != "${published}" ]]; then
+    echo "Home-network HTTPS: ${published:-off} -> ${lan_address:-off}."
+  fi
+}
+
+# Host values the cluster's manifests need, substituted by Flux: the lan
+# listener address (envoy-proxy.yaml) and the LLM's model directory, user
+# and GPU groups (llm/deployment.yaml).
+write_host_configmap() {
+  local settings="$1"
+  local arguments=(--from-literal="MODELS_DIR=${models_dir}")
+  local line
+
+  while IFS= read -r line; do
+    arguments+=(--from-literal="${line}")
+  done <<<"${settings}"
+  if [[ -n "${lan_address}" ]]; then
+    arguments+=(--from-literal="LAN_ADDRESS=${lan_address}")
+  fi
+  kubectl --context "${cluster_context}" --namespace flux-system \
+    create configmap homelab-host "${arguments[@]}" \
+    --dry-run=client -o yaml \
+    | kubectl --context "${cluster_context}" apply \
+      --server-side --force-conflicts --field-manager=homelab-bootstrap -f -
 }
 
 ensure_lab_ca() {
@@ -215,76 +285,6 @@ ensure_mlflow_credentials() {
   "${repository_root}/scripts/ml-credentials.py" mlflow --bucket mlflow-artifacts
 }
 
-published_lan_address() {
-  { docker port "${cluster_name}-control-plane" "${lan_node_port}/tcp" 2>/dev/null || true; } \
-    | awk -F: -v expected_port="${lan_host_port}" '
-        $NF == expected_port { print $1; exit }
-      '
-}
-
-check_existing_lan_mapping() {
-  local published
-
-  published="$(published_lan_address)"
-  if [[ -z "${lan_address}" ]]; then
-    # The address is fixed when the cluster is created, so later runs keep
-    # using it without LAN_ADDRESS.
-    if [[ -n "${published}" && "${published}" != "127.0.0.1" ]]; then
-      lan_address="${published}"
-    fi
-    return
-  fi
-  if [[ "${published}" != "${lan_address}" ]]; then
-    echo "This cluster publishes home-network HTTPS on ${published:-no address}, not ${lan_address}." >&2
-    echo "Kind fixes port mappings when a cluster is created, and the cluster has been preserved." >&2
-    echo "To change it, back up persistent data (docs/recovery.md), delete the cluster and rerun bootstrap with LAN_ADDRESS." >&2
-    return 1
-  fi
-}
-
-validate_cluster_mounts() {
-  local node_names
-  local cluster_nodes
-
-  node_names="$(kind get nodes --name "${cluster_name}")"
-  if [[ -z "${node_names}" ]]; then
-    echo "Could not find nodes in Kind cluster ${cluster_name}." >&2
-    return 1
-  fi
-  mapfile -t cluster_nodes <<<"${node_names}"
-  docker inspect "${cluster_nodes[@]}" | python3 -c '
-import json
-import os
-import sys
-
-expected_models_dir = os.path.realpath(sys.argv[1])
-workers = []
-errors = []
-for node in json.load(sys.stdin):
-    if node.get("Config", {}).get("Labels", {}).get("io.x-k8s.kind.role") != "worker":
-        continue
-    name = node["Name"].lstrip("/")
-    workers.append(name)
-    mounts = {mount["Destination"]: mount for mount in node.get("Mounts", [])}
-    for destination, source in (("/models", expected_models_dir), ("/dev/dri", "/dev/dri")):
-        mount = mounts.get(destination, {})
-        actual_source = mount.get("Source", "")
-        displayed_source = actual_source or "<missing>"
-        if mount.get("Type") != "bind" or os.path.realpath(actual_source) != source:
-            errors.append(f"{name}: {destination} must bind {source}; found {displayed_source}")
-        elif destination == "/models" and mount.get("RW", True):
-            errors.append(f"{name}: /models must be mounted read-only")
-if not workers:
-    errors.append("The cluster has no worker nodes for the GPU model server.")
-if errors:
-    print("Existing cluster mounts are incompatible:", file=sys.stderr)
-    print("\n".join(errors), file=sys.stderr)
-    print("The cluster has been preserved. Use its original MODELS_DIR, or back up persistent data and explicitly rebuild the cluster to change mounts.", file=sys.stderr)
-    raise SystemExit(1)
-print("\n".join(workers))
-' "${models_dir}"
-}
-
 require_command() {
   local command_name="$1"
 
@@ -292,6 +292,29 @@ require_command() {
     echo "Missing required command: ${command_name}" >&2
     echo "Run ./scripts/bootstrap-host.sh first." >&2
     exit 1
+  fi
+}
+
+# Kind published the same host ports through Docker. Both at once would
+# compete for 127.0.0.1:8080 and LAN_ADDRESS:443.
+require_kind_stopped() {
+  if command -v docker >/dev/null 2>&1 \
+    && [[ "$(docker inspect --format '{{.State.Running}}' "${kind_control_plane}" 2>/dev/null)" == "true" ]]; then
+    echo "The old Kind cluster is still running (${kind_control_plane})." >&2
+    echo "Back it up and stop it first; see docs/migrate-to-k3s.md." >&2
+    return 1
+  fi
+}
+
+require_cluster() {
+  if ! kubectl config get-contexts "${cluster_context}" >/dev/null 2>&1; then
+    echo "No ${cluster_context} context in your kubeconfig." >&2
+    echo "Run ./scripts/bootstrap-host.sh first; it installs k3s and adds the context." >&2
+    return 1
+  fi
+  if ! kubectl --context "${cluster_context}" --request-timeout=10s get --raw /readyz >/dev/null 2>&1; then
+    echo "The ${cluster_context} cluster is not answering. Check: systemctl status k3s" >&2
+    return 1
   fi
 }
 
@@ -317,6 +340,26 @@ bootstrap_flux() {
     -f "${flux_system_path}/gotk-sync.yaml"
 }
 
+# AMD's device plugin registers amd.com/gpu with the kubelet shortly after
+# its pod starts. Without it the LLM stays Pending.
+wait_for_gpu_resource() {
+  local timeout_seconds="${1:-180}"
+  local deadline=$((SECONDS + timeout_seconds))
+  local allocatable
+
+  until allocatable="$(
+    kubectl --context "${cluster_context}" get nodes \
+      -o jsonpath='{.items[*].status.allocatable.amd\.com/gpu}'
+  )" && [[ "${allocatable}" =~ [1-9] ]]; do
+    if (( SECONDS >= deadline )); then
+      echo "The node does not advertise amd.com/gpu. Check the device plugin:" >&2
+      echo "  kubectl --context ${cluster_context} -n kube-system logs daemonset/amdgpu-device-plugin" >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
+
 wait_for_flux_kustomizations() {
   local infrastructure_manifests=(
     "${repository_root}/kubernetes/clusters/dev/infrastructure/gateway-api-controller.yaml"
@@ -326,6 +369,7 @@ wait_for_flux_kustomizations() {
     "${repository_root}/kubernetes/clusters/dev/infrastructure/monitoring.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/logging.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/argocd.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/gpu.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/llm.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/chat.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/ml-storage.yaml"
@@ -359,32 +403,11 @@ wait_for_flux_kustomizations() {
     flux reconcile kustomization "${kustomization_name}" \
       --context "${cluster_context}" \
       --timeout=15m
+
+    if [[ "${kustomization_name}" == "gpu" ]]; then
+      wait_for_gpu_resource
+    fi
   done
-}
-
-gateway_host_port_is_mapped() {
-  docker port "${cluster_name}-control-plane" \
-    "${gateway_node_port}/tcp" 2>/dev/null \
-    | awk -F: -v expected_port="${gateway_host_port}" '
-        $NF == expected_port { found = 1 }
-        END { exit !found }
-      '
-}
-
-gateway_url() {
-  local node_address
-
-  if gateway_host_port_is_mapped; then
-    printf 'http://localhost:%s' "${gateway_host_port}"
-    return
-  fi
-
-  node_address="$(
-    kubectl --context "${cluster_context}" \
-      get node "${cluster_name}-control-plane" \
-      -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'
-  )"
-  printf 'http://%s:%s' "${node_address}" "${gateway_node_port}"
 }
 
 wait_for_gateway_api() {
@@ -438,7 +461,7 @@ wait_for_gateway_endpoint() {
   local endpoint
   local deadline
 
-  endpoint="$(gateway_url)${path}"
+  endpoint="${gateway_url}${path}"
   deadline=$((SECONDS + timeout_seconds))
 
   until curl --noproxy '*' --fail --silent --max-time 2 \
@@ -495,62 +518,33 @@ wait_for_llm_demand() {
 }
 
 main() {
-  local existing_clusters
   local lab_mode
-  local llm_nodes
-  local node_name
+  local settings
 
-  for required_command in curl docker kind kubectl flux openssl python3 sha256sum; do
+  for required_command in curl kubectl flux openssl python3 sha256sum; do
     require_command "${required_command}"
   done
   validate_lan_address
 
-  # Check local prerequisites before creating or changing a cluster. The check
+  # Check local prerequisites before changing the cluster. The check
   # verifies the pinned hashes without starting a multi-gigabyte download.
   MODELS_DIR="${models_dir}" "${repository_root}/scripts/download-models.sh" --check
   models_dir="$(cd "${models_dir}" && pwd -P)"
+  validate_models_dir
   validate_gpu_directory
-
-  if ! docker info >/dev/null 2>&1; then
-    echo "Docker is not available to the current user." >&2
-    echo "Log out and back in after running ./scripts/bootstrap-host.sh." >&2
-    exit 1
-  fi
+  settings="$(host_settings)"
+  require_kind_stopped
   ensure_lab_ca
   ensure_ml_storage_secrets
 
-  existing_clusters="$(kind get clusters)"
-  if grep -Fxq "${cluster_name}" <<<"${existing_clusters}"; then
-    echo "Kind cluster ${cluster_name} already exists."
-    llm_nodes="$(validate_cluster_mounts)"
-    check_existing_lan_mapping
-    if ! gateway_host_port_is_mapped; then
-      echo "This cluster predates the localhost Gateway port mapping."
-      echo "Bootstrap will use its Kind node address without recreating the cluster."
-    fi
-  else
-    echo "Creating Kind cluster ${cluster_name}..."
-    rendered_cluster_config="$(mktemp --suffix=.yaml)"
-    trap 'rm -f -- "${rendered_cluster_config}"' EXIT
-    render_cluster_config "${rendered_cluster_config}"
-    kind create cluster --config "${rendered_cluster_config}"
-    rm -f -- "${rendered_cluster_config}"
-    trap - EXIT
-    llm_nodes="$(validate_cluster_mounts)"
-  fi
-
+  require_cluster
   echo "Waiting for Kubernetes nodes..."
   kubectl --context "${cluster_context}" \
     wait --for=condition=Ready nodes --all --timeout=2m
-
-  # Existing clusters also receive the placement label after their immutable
-  # mounts have been checked, so an upgrade does not require cluster recreation.
-  while IFS= read -r node_name; do
-    kubectl --context "${cluster_context}" label node "${node_name}" \
-      "${llm_node_label}=true" --overwrite
-  done <<<"${llm_nodes}"
+  resolve_lan_address
 
   bootstrap_flux
+  write_host_configmap "${settings}"
   load_lab_ca
   load_ml_storage_secrets
 
@@ -619,8 +613,8 @@ main() {
     echo "Devices need router DNS entries for these names pointing at ${lan_address},"
     echo "and must trust the root certificate ${lab_ca_dir}/ca.crt (docs/operations.md)."
   else
-    echo "Home-network access is off. Enabling it requires a cluster created with"
-    echo "LAN_ADDRESS set to this host's private IPv4 address (docs/operations.md)."
+    echo "Home-network access is off. Turn it on by rerunning with LAN_ADDRESS set to"
+    echo "this host's private IPv4 address (docs/operations.md)."
   fi
 }
 
