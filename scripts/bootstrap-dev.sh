@@ -331,6 +331,8 @@ wait_for_flux_kustomizations() {
     "${repository_root}/kubernetes/clusters/dev/infrastructure/ml-storage.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/mlflow.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/kafka.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/kueue.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/kueue-queues.yaml"
   )
   local manifests=("${infrastructure_manifests[@]}")
   local manifest_path
@@ -611,7 +613,7 @@ main() {
   echo "Access MLflow at http://mlflow.localhost:8080 (this host only; no login)"
   echo "In-cluster: MLflow http://mlflow.mlflow.svc.cluster.local:5000,"
   echo "S3 http://s3.ml-storage.svc.cluster.local:9000 (credentials: ./scripts/ml-credentials.py NAMESPACE),"
-  echo "Kafka kafka.kafka.svc.cluster.local:9092 (docs/operations.md)"
+  echo "Kafka kafka.kafka.svc.cluster.local:9092; GPU Jobs queue through Kueue ClusterQueue gpu (docs/operations.md)"
   printf '%s\n' "kubectl --context ${cluster_context} -n argocd get secret argocd-initial-admin-secret -o go-template='{{ index .data \"password\" | base64decode }}{{ \"\\n\" }}'"
   echo "Read the generated Grafana login with:"
   printf '%s\n' "kubectl --context ${cluster_context} -n monitoring get secret kube-prometheus-stack-grafana -o go-template='user: {{ index .data \"admin-user\" | base64decode }}{{ \"\\n\" }}password: {{ index .data \"admin-password\" | base64decode }}{{ \"\\n\" }}'"

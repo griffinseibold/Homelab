@@ -1,0 +1,20 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: kueue-queues
+  namespace: flux-system
+spec:
+  dependsOn:
+    # The ResourceFlavor and ClusterQueue CRDs, and the webhook that
+    # validates them, come from the Kueue chart. Applying them in the same
+    # Kustomization would fail on a fresh cluster before the CRDs exist.
+    - name: kueue
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  path: ./kubernetes/infrastructure/kueue/queues
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system

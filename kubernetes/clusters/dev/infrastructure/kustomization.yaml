@@ -13,4 +13,6 @@ resources:
   - ml-storage.yaml
   - mlflow.yaml
   - kafka.yaml
+  - kueue.yaml
+  - kueue-queues.yaml
 

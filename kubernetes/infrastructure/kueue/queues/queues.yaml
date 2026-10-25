@@ -1,0 +1,43 @@
+# The platform's one queue for batch Jobs. Applications create a LocalQueue
+# in their own namespace pointing at ClusterQueue gpu, label the namespace
+# kueue.homelab/queues: "true", and label each Job with
+# kueue.x-k8s.io/queue-name. See docs/operations.md, "Streaming and batch
+# queueing". API reference: https://kueue.sigs.k8s.io/docs/concepts/
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: amd-gpu
+# No node labels or taints: the host has one GPU node. On k3s, AMD's device
+# plugin advertises the Radeon as amd.com/gpu; Kind has no device plugin,
+# so there a Job asking for amd.com/gpu is admitted but its pod stays
+# Pending, because no node offers the resource.
+spec: {}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: gpu
+spec:
+  # Only namespaces that opted in (the same label Kueue's configuration
+  # watches in helm-release.yaml).
+  namespaceSelector:
+    matchLabels:
+      kueue.homelab/queues: "true"
+  # Oldest first, but a Job that does not fit (for example one waiting for
+  # the GPU) does not hold up a smaller one behind it that does.
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+    - coveredResources: ["cpu", "memory", "amd.com/gpu"]
+      flavors:
+        - name: amd-gpu
+          resources:
+            # One physical GPU, so at most one admitted Job may hold it.
+            - name: amd.com/gpu
+              nominalQuota: 1
+            # Generous on purpose: the GPU is the scarce resource Kueue is
+            # here to share. These leave room on the 12-core, 48 GB host for
+            # the platform and the LLM.
+            - name: cpu
+              nominalQuota: 16
+            - name: memory
+              nominalQuota: 32Gi
