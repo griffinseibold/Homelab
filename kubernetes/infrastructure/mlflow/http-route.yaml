@@ -1,0 +1,23 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mlflow
+  labels:
+    app.kubernetes.io/name: mlflow
+spec:
+  hostnames:
+    - mlflow.localhost
+  # The loopback-only http listener only. MLflow has no login, so it gets no
+  # lan parent reference or lab.internal hostname.
+  parentRefs:
+    - name: homelab
+      namespace: gateway-system
+      sectionName: http
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: mlflow
+          port: 5000

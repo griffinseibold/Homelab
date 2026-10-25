@@ -21,6 +21,10 @@ llm_node_label="homelab.local/llm-capable"
 lan_address="${LAN_ADDRESS:-}"
 lab_domain="lab.internal"
 lab_ca_dir="${LAB_CA_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/homelab/lab-ca}"
+# Garage's RPC secret and admin token are generated once and kept on the host,
+# like the lab CA, so they never enter Git. S3 access keys are not kept here:
+# they live in Garage's own database (see scripts/ml-credentials.py).
+ml_storage_dir="${ML_STORAGE_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/homelab/ml-storage}"
 
 validate_gpu_directory() {
   local gpu_directory="${1:-/dev/dri}"
@@ -142,6 +146,75 @@ load_lab_ca() {
       --server-side --field-manager=homelab-bootstrap -f -
 }
 
+ensure_ml_storage_secrets() {
+  local rpc_secret="${ml_storage_dir}/rpc-secret"
+  local admin_token="${ml_storage_dir}/admin-token"
+
+  if [[ -f "${rpc_secret}" && -f "${admin_token}" ]]; then
+    return
+  fi
+  if [[ -e "${rpc_secret}" || -e "${admin_token}" ]]; then
+    echo "Only part of the Garage secrets exists in ${ml_storage_dir}." >&2
+    echo "Restore the missing file from your copy, or delete both to generate new ones;" >&2
+    echo "Garage's data does not depend on them (docs/operations.md)." >&2
+    return 1
+  fi
+
+  echo "Creating Garage secrets in ${ml_storage_dir}..."
+  mkdir -p "${ml_storage_dir}"
+  chmod 700 "${ml_storage_dir}"
+  (
+    umask 077
+    # Garage expects the RPC secret as 32 bytes of hex.
+    openssl rand -hex 32 | tr -d '\n' > "${rpc_secret}.new"
+    openssl rand -base64 32 | tr -d '\n' > "${admin_token}.new"
+    mv "${rpc_secret}.new" "${rpc_secret}"
+    mv "${admin_token}.new" "${admin_token}"
+  )
+}
+
+load_ml_storage_secrets() {
+  kubectl --context "${cluster_context}" create namespace ml-storage \
+    --dry-run=client -o yaml \
+    | kubectl --context "${cluster_context}" apply \
+      --server-side --field-manager=homelab-bootstrap -f -
+  # The values go through stdin, never the command line, and server-side
+  # apply keeps them out of a last-applied annotation.
+  python3 - "${ml_storage_dir}/rpc-secret" "${ml_storage_dir}/admin-token" <<'PY' \
+    | kubectl --context "${cluster_context}" apply \
+      --server-side --field-manager=homelab-bootstrap -f -
+import base64
+import json
+import pathlib
+import re
+import sys
+
+rpc_secret, admin_token = (pathlib.Path(path).read_text().strip() for path in sys.argv[1:])
+if not re.fullmatch(r"[0-9a-f]{64}", rpc_secret):
+    raise SystemExit(f"{sys.argv[1]} must hold 64 hexadecimal characters (openssl rand -hex 32).")
+if len(admin_token) < 32:
+    raise SystemExit(f"{sys.argv[2]} must hold at least 32 characters (openssl rand -base64 32).")
+print(json.dumps({
+    "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+    "metadata": {"name": "garage", "namespace": "ml-storage"},
+    "data": {name: base64.b64encode(value.encode()).decode() for name, value in
+             (("GARAGE_RPC_SECRET", rpc_secret), ("GARAGE_ADMIN_TOKEN", admin_token))},
+}))
+PY
+}
+
+# MLflow's artifact store credentials. scripts/ml-credentials.py creates the
+# key in Garage (or reuses it) and writes mlflow/s3-credentials; it needs
+# Garage running, so this runs after the ml-storage Kustomization is ready and
+# before the mlflow one is waited for.
+ensure_mlflow_credentials() {
+  kubectl --context "${cluster_context}" create namespace mlflow \
+    --dry-run=client -o yaml \
+    | kubectl --context "${cluster_context}" apply \
+      --server-side --field-manager=homelab-bootstrap -f -
+  "${repository_root}/scripts/ml-credentials.py" mlflow --bucket mlflow-artifacts
+}
+
 published_lan_address() {
   { docker port "${cluster_name}-control-plane" "${lan_node_port}/tcp" 2>/dev/null || true; } \
     | awk -F: -v expected_port="${lan_host_port}" '
@@ -255,6 +328,8 @@ wait_for_flux_kustomizations() {
     "${repository_root}/kubernetes/clusters/dev/infrastructure/argocd.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/llm.yaml"
     "${repository_root}/kubernetes/clusters/dev/infrastructure/chat.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/ml-storage.yaml"
+    "${repository_root}/kubernetes/clusters/dev/infrastructure/mlflow.yaml"
   )
   local manifests=("${infrastructure_manifests[@]}")
   local manifest_path
@@ -275,6 +350,10 @@ wait_for_flux_kustomizations() {
     if [[ -z "${kustomization_name}" ]]; then
       echo "Could not determine the Flux Kustomization in ${manifest_path}." >&2
       exit 1
+    fi
+
+    if [[ "${kustomization_name}" == "mlflow" ]]; then
+      ensure_mlflow_credentials
     fi
 
     flux reconcile kustomization "${kustomization_name}" \
@@ -344,6 +423,10 @@ wait_for_gateway_api() {
     --timeout=5m
   kubectl --context "${cluster_context}" --namespace chat \
     wait httproute/open-webui \
+    --for="jsonpath={.status.parents[0].conditions[?(@.type=='Accepted')].status}=True" \
+    --timeout=5m
+  kubectl --context "${cluster_context}" --namespace mlflow \
+    wait httproute/mlflow \
     --for="jsonpath={.status.parents[0].conditions[?(@.type=='Accepted')].status}=True" \
     --timeout=5m
 }
@@ -434,6 +517,7 @@ main() {
     exit 1
   fi
   ensure_lab_ca
+  ensure_ml_storage_secrets
 
   existing_clusters="$(kind get clusters)"
   if grep -Fxq "${cluster_name}" <<<"${existing_clusters}"; then
@@ -468,6 +552,7 @@ main() {
 
   bootstrap_flux
   load_lab_ca
+  load_ml_storage_secrets
 
   echo "Reconciling the latest Git revision..."
   flux reconcile kustomization flux-system \
@@ -480,6 +565,7 @@ main() {
   wait_for_gateway_api
   wait_for_gateway_endpoint grafana.localhost /api/health
   wait_for_gateway_endpoint argocd.localhost /healthz
+  wait_for_gateway_endpoint mlflow.localhost /health
   wait_for_llm_demand
   lab_mode="$(current_lab_mode)"
   # In apps mode the LLM runs only while an application requests it and the
@@ -521,6 +607,9 @@ main() {
   fi
   echo "Access Grafana at http://grafana.localhost:8080"
   echo "Access Argo CD at http://argocd.localhost:8080 (user admin; password below)"
+  echo "Access MLflow at http://mlflow.localhost:8080 (this host only; no login)"
+  echo "In-cluster: MLflow http://mlflow.mlflow.svc.cluster.local:5000,"
+  echo "S3 http://s3.ml-storage.svc.cluster.local:9000 (credentials: ./scripts/ml-credentials.py NAMESPACE)"
   printf '%s\n' "kubectl --context ${cluster_context} -n argocd get secret argocd-initial-admin-secret -o go-template='{{ index .data \"password\" | base64decode }}{{ \"\\n\" }}'"
   echo "Read the generated Grafana login with:"
   printf '%s\n' "kubectl --context ${cluster_context} -n monitoring get secret kube-prometheus-stack-grafana -o go-template='user: {{ index .data \"admin-user\" | base64decode }}{{ \"\\n\" }}password: {{ index .data \"admin-password\" | base64decode }}{{ \"\\n\" }}'"

@@ -1,0 +1,165 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow
+  labels:
+    app.kubernetes.io/name: mlflow
+spec:
+  # Holds only the SQLite backend store (runs, parameters, metrics). Artifacts
+  # go to the mlflow-artifacts bucket. One user's experiments fit easily; a
+  # PostgreSQL backend is the upgrade path if that changes.
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  labels:
+    app.kubernetes.io/name: mlflow
+spec:
+  # SQLite allows one writer process; Recreate also avoids a rolling-update
+  # deadlock on the ReadWriteOnce claim.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mlflow
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mlflow
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        # The image sets no user; run as an unprivileged one. HOME points at
+        # a scratch volume because the root filesystem is read-only.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mlflow
+          # The -full variant installs mlflow[extras], which includes boto3
+          # for the S3 artifact store; the plain image does not.
+          image: ghcr.io/mlflow/mlflow:v3.17.2-full
+          command:
+            - mlflow
+            - server
+            - --host
+            - 0.0.0.0
+            - --port
+            - "5000"
+            # One worker process: SQLite and a single user.
+            - --workers
+            - "1"
+            - --backend-store-uri
+            - sqlite:////data/mlflow.db
+            # The server proxies artifact uploads and downloads, so clients
+            # need only MLFLOW_TRACKING_URI and never hold S3 credentials.
+            - --serve-artifacts
+            - --artifacts-destination
+            - s3://mlflow-artifacts
+            # Host headers the server accepts (DNS rebinding protection since
+            # MLflow 3.5). Matching is exact unless a pattern has *, and the
+            # port is part of the Host header. mlflow.localhost without a port
+            # covers clusters reached through their node address (operations
+            # guide, troubleshooting).
+            - --allowed-hosts
+            - mlflow.localhost:8080,mlflow.localhost,mlflow.mlflow.svc.cluster.local:5000,mlflow.mlflow.svc:5000,mlflow.mlflow:5000,mlflow:5000,localhost:*,127.0.0.1:*
+            # The UI calls the API from this origin.
+            - --cors-allowed-origins
+            - http://mlflow.localhost:8080
+          env:
+            - name: HOME
+              value: /tmp
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: http://s3.ml-storage.svc.cluster.local:9000
+            # Garage serves path-style requests only.
+            - name: MLFLOW_BOTO_CLIENT_ADDRESSING_STYLE
+              value: path
+            # Matches s3_region in Garage's configuration.
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: MLFLOW_DISABLE_TELEMETRY
+              value: "true"
+            - name: DO_NOT_TRACK
+              value: "1"
+            # Written by: scripts/ml-credentials.py mlflow --bucket mlflow-artifacts
+            # (bootstrap-dev.sh does this). The pod waits until it exists.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: AWS_SECRET_ACCESS_KEY
+          ports:
+            - name: http
+              containerPort: 5000
+          # /health is exempt from the allowed-hosts check, so kubelet probes
+          # by pod IP work. The first start creates the database schema.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mlflow
+        # Scratch space for uploads being proxied to S3 and Python caches.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 4Gi
+---
+# The contract endpoint: http://mlflow.mlflow.svc.cluster.local:5000
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  labels:
+    app.kubernetes.io/name: mlflow
+spec:
+  selector:
+    app.kubernetes.io/name: mlflow
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http

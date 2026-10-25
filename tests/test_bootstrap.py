@@ -3,6 +3,7 @@
 Run with: python3 -m unittest discover -s tests -v
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -30,6 +31,16 @@ class BootstrapTests(unittest.TestCase):
         shutil.copy2(ROOT / "scripts/bootstrap-dev.sh", self.repo / "scripts")
         shutil.copy2(ROOT / "scripts/download-models.sh", self.repo / "scripts")
         shutil.copy2(ROOT / "kubernetes/kind/dev.yaml", self.repo / "kubernetes/kind")
+        # ml-credentials.py has its own tests; here it only records that
+        # bootstrap ran it, and with which arguments.
+        credentials = self.repo / "scripts/ml-credentials.py"
+        credentials.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "with open(os.environ['MOCK_LOG'], 'a') as log:\n"
+            "    log.write(json.dumps(['ml-credentials.py', *sys.argv[1:]]) + '\\n')\n"
+        )
+        credentials.chmod(0o755)
         shutil.copytree(
             ROOT / "kubernetes/clusters/dev/infrastructure",
             self.repo / "kubernetes/clusters/dev/infrastructure",
@@ -80,6 +91,11 @@ elif tool == "docker":
             print(os.environ["LAN_PORT_MAPPING"])
         else:
             print("127.0.0.1:8080")
+elif tool == "kubectl" and "apply" in args and "-" in args:
+    # Record what was applied from standard input, to check that secrets
+    # arrive through stdin rather than the command line.
+    with open(os.environ["MOCK_LOG"] + ".stdin", "a") as applied:
+        applied.write(sys.stdin.read() + "\n")
 elif tool == "kubectl" and args[2:6] == ["--namespace", "llm", "get", "configmap"]:
     # The lab mode is cluster state; unset means the ConfigMap is missing.
     print(os.environ.get("LAB_MODE", ""), end="")
@@ -122,10 +138,12 @@ elif tool == "curl" and "--output" in args:
             RENDERED_CONFIG=str(self.rendered),
             INSPECT_JSON=json.dumps(self.nodes),
             LAB_CA_DIR=str(self.directory / "lab-ca"),
+            ML_STORAGE_DIR=str(self.directory / "ml-storage"),
         )
         self.env.pop("LAN_ADDRESS", None)
         self.env.pop("LAB_MODE", None)
         self.lab_ca = self.directory / "lab-ca"
+        self.ml_storage = self.directory / "ml-storage"
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
@@ -456,7 +474,7 @@ elif tool == "curl" and "--output" in args:
                 call[:6] == ["kubectl", "--context", "kind-homelab-dev", "--namespace", namespace, "wait"]
                 and route in call for call in calls
             ), route)
-        self.assertEqual(self.gateway_probes(), ["grafana.localhost", "argocd.localhost"])
+        self.assertEqual(self.gateway_probes(), ["grafana.localhost", "argocd.localhost", "mlflow.localhost"])
         self.assertIn("apps mode", result.stdout)
 
     def test_llm_mode_also_waits_for_llm_and_chat(self):
@@ -468,13 +486,72 @@ elif tool == "curl" and "--output" in args:
         self.assert_success(result)
         self.assertEqual(
             self.gateway_probes(),
-            ["grafana.localhost", "argocd.localhost", "llm.localhost", "chat.localhost"],
+            ["grafana.localhost", "argocd.localhost", "mlflow.localhost", "llm.localhost", "chat.localhost"],
         )
         self.assertTrue(any(
             call[0] == "curl" and "chat.lab.internal:443:192.168.1.50" in call for call in self.calls()
         ))
         self.assertIn("llm mode", result.stdout)
         self.assertIn("http://chat.localhost:8080", result.stdout)
+
+    def test_ml_storage_secrets_are_created_once_privately(self):
+        self.assert_success(self.run_bootstrap("ensure_ml_storage_secrets"))
+        rpc = (self.ml_storage / "rpc-secret").read_text()
+        token = (self.ml_storage / "admin-token").read_text()
+        self.assertRegex(rpc, r"^[0-9a-f]{64}$")
+        self.assertGreaterEqual(len(token), 32)
+        self.assertEqual(self.ml_storage.stat().st_mode & 0o777, 0o700)
+        for name in ("rpc-secret", "admin-token"):
+            self.assertEqual((self.ml_storage / name).stat().st_mode & 0o777, 0o600)
+        self.assert_success(self.run_bootstrap("ensure_ml_storage_secrets"))
+        self.assertEqual((self.ml_storage / "rpc-secret").read_text(), rpc)
+        self.assertEqual((self.ml_storage / "admin-token").read_text(), token)
+        self.assertEqual(self.calls(), [])
+
+    def test_partial_ml_storage_secrets_are_never_replaced(self):
+        self.assert_success(self.run_bootstrap("ensure_ml_storage_secrets"))
+        token = (self.ml_storage / "admin-token").read_text()
+        (self.ml_storage / "rpc-secret").unlink()
+        result = self.run_bootstrap("ensure_ml_storage_secrets")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Only part of the Garage secrets", result.stderr)
+        self.assertEqual((self.ml_storage / "admin-token").read_text(), token)
+        self.assertFalse((self.ml_storage / "rpc-secret").exists())
+
+    def test_garage_secret_is_applied_through_stdin_only(self):
+        self.assert_success(self.run_bootstrap("ensure_ml_storage_secrets; load_ml_storage_secrets"))
+        token = (self.ml_storage / "admin-token").read_text()
+        self.assertFalse(any(token in " ".join(call) for call in self.calls()))
+        applied = [json.loads(line) for line in Path(str(self.log) + ".stdin").read_text().splitlines()
+                   if line.startswith("{")]
+        secret = next(item for item in applied if item.get("kind") == "Secret")
+        self.assertEqual(secret["metadata"], {"name": "garage", "namespace": "ml-storage"})
+        self.assertEqual(base64.b64decode(secret["data"]["GARAGE_ADMIN_TOKEN"]).decode(), token)
+        self.assertTrue(any("--server-side" in call and "apply" in call for call in self.calls()))
+
+    def test_malformed_garage_rpc_secret_stops_loading(self):
+        self.ml_storage.mkdir()
+        (self.ml_storage / "rpc-secret").write_text("not hex")
+        (self.ml_storage / "admin-token").write_text("x" * 44)
+        result = self.run_bootstrap("load_ml_storage_secrets")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("64 hexadecimal characters", result.stderr)
+
+    def test_bootstrap_loads_garage_secrets_and_creates_mlflow_credentials_in_order(self):
+        self.target.write_bytes(PAYLOAD)
+        result = self.run_bootstrap()
+        self.assert_success(result)
+        calls = self.calls()
+        def index(predicate):
+            return next(i for i, call in enumerate(calls) if predicate(call))
+        reconcile = lambda name: index(lambda c: c[:4] == ["flux", "reconcile", "kustomization", name])
+        credentials = index(lambda c: c == ["ml-credentials.py", "mlflow", "--bucket", "mlflow-artifacts"])
+        self.assertLess(reconcile("ml-storage"), credentials)
+        self.assertLess(credentials, reconcile("mlflow"))
+        self.assertTrue((self.ml_storage / "rpc-secret").exists())
+        self.assertTrue(any(c[:6] == ["kubectl", "--context", "kind-homelab-dev", "--namespace", "mlflow", "wait"]
+                            and "httproute/mlflow" in c for c in calls))
+        self.assertIn("http://mlflow.localhost:8080", result.stdout)
 
     def test_unknown_lab_mode_is_treated_as_apps(self):
         self.env["LAB_MODE"] = "chat"

@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlflow
+  # Reachable through the loopback-only http listener. No gateway.homelab/lan
+  # label: MLflow has no login, so it never goes on the home network.
+  labels:
+    gateway.homelab/access: public
