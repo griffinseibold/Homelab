@@ -63,6 +63,11 @@ For an existing cluster upgrading to the worker placement labels in this
 revision, run the new `bootstrap-dev.sh` before pushing the LLM manifests.
 It checks the mounts and labels compatible workers so the server can schedule.
 
+When the S3 storage and MLflow first reach an existing cluster, rerun
+`bootstrap-dev.sh` after pushing: it generates and loads Garage's secrets and
+MLflow's S3 credentials. Until then those two Flux Kustomizations stay not
+ready; the rest of the platform is unaffected.
+
 ## Access
 
 | Service | On this host | Home network | Login |

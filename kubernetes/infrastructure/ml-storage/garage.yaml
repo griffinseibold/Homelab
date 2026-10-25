@@ -95,6 +95,9 @@ spec:
               readOnly: true
             - name: data
               mountPath: /var/lib/garage
+            # The root filesystem is read-only; scratch space just in case.
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: config
           configMap:
@@ -104,6 +107,9 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: garage
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
 ---
 # The contract endpoint for applications and MLflow:
 # http://s3.ml-storage.svc.cluster.local:9000, path-style addressing.

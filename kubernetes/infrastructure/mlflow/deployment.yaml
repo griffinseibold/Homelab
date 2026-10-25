@@ -78,6 +78,10 @@ spec:
           env:
             - name: HOME
               value: /tmp
+            # UID 1000 has no passwd entry in the image; Python's
+            # getpass.getuser() reads this first instead of failing.
+            - name: USER
+              value: mlflow
             - name: MLFLOW_S3_ENDPOINT_URL
               value: http://s3.ml-storage.svc.cluster.local:9000
             # Garage serves path-style requests only.
