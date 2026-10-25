@@ -102,11 +102,12 @@ spec:
           image: apache/kafka:4.3.1
           # The image's own entrypoint (/etc/kafka/docker/run) copies
           # /mnt/shared/config/server.properties into place, formats the
-          # volume on the first start and starts the broker. The variables
-          # below are set only for that process, not for the container:
-          # tools started with `kubectl exec` (kafka-topics.sh and friends)
-          # read the same names, and would otherwise try to start a second
-          # JMX agent on the same port and get a 1 GiB heap.
+          # volume on the first start (a short JVM that also loads the
+          # agent, then exits) and starts the broker. The variables below are
+          # set only for that process, not for the container: tools started
+          # with `kubectl exec` (kafka-topics.sh and friends) read the same
+          # names, and would otherwise try to start a second JMX agent on the
+          # same port and get a 1 GiB heap.
           command:
             - /bin/bash
             - -c
@@ -138,8 +139,10 @@ spec:
               containerPort: 9092
             - name: metrics
               containerPort: 9404
-          # The client listener opens once the broker has loaded its metadata
-          # and can serve requests. The first start also formats the volume.
+          # TCP checks, as an exec of Kafka's own tools would start a JVM
+          # every few seconds. The port opens moments before the broker
+          # serves requests, so clients retry briefly after a restart, which
+          # Kafka clients do anyway.
           startupProbe:
             tcpSocket:
               port: kafka
@@ -174,8 +177,8 @@ spec:
             - name: jmx-config
               mountPath: /etc/kafka/jmx
               readOnly: true
-            # Exactly the image's VOLUME path. containerd gives any image
-            # VOLUME without a Kubernetes mount at that exact path its own
+            # Exactly the image's VOLUME path. The container runtime gives an
+            # image VOLUME without a mount at that exact path its own
             # throwaway directory, which would hide a volume mounted above it.
             - name: data
               mountPath: /var/lib/kafka/data
