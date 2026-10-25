@@ -355,4 +355,5 @@ that revision's [recovery guide](recovery.md).
 | `restore-volume`: target used by a pod | A writer is still running (step 6); `kubectl --context homelab-dev get pods -A` |
 | `empty-claim --replace` hangs deleting | A pod still mounts it; the PVC protection finalizer waits for it to stop |
 | Restored chat or Grafana shows no data | The claim name restored does not match the one the chart uses; compare `kubectl --context homelab-dev get pvc -A` with the backup list |
+| Gateway answers on 127.0.0.1:8080 but not from the home network | Docker, still installed from the Kind setup, may set the iptables FORWARD policy to DROP. `sudo iptables -S FORWARD \| head -1`; if it is `-P FORWARD DROP`, stop Docker (`sudo systemctl disable --now docker docker.socket`) or remove it (step 10) and restart k3s |
 | Backup on k3s: cgroups not found | `ls /sys/fs/cgroup/kubepods.slice /sys/fs/cgroup/system.slice/k3s.service`; the script needs cgroup v2 (Ubuntu's default) |

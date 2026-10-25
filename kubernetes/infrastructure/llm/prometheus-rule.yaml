@@ -29,7 +29,7 @@ spec:
             service: llama-server
           annotations:
             summary: LLM metrics have been unavailable for 10 minutes while it should be running
-            description: Check the llama-server pod, model and GPU mounts, startup logs, and ServiceMonitor. Normal model loading and brief restarts are allowed 10 minutes to recover. A server scaled to zero by the demand controller does not alert.
+            description: Check the llama-server pod (Pending means another pod holds amd.com/gpu), the model directory, startup logs, and ServiceMonitor. Normal model loading and brief restarts are allowed 10 minutes to recover. A server scaled to zero by the demand controller does not alert.
         - alert: LlamaServerQueueBacklog
           expr: max(llamacpp:requests_deferred{namespace="llm", service="llama-server"}) > 0
           for: 10m
