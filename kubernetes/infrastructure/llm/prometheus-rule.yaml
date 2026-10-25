@@ -12,15 +12,24 @@ spec:
       rules:
         - alert: LlamaServerUnavailable
           # The fallback also catches missing pods, endpoints or discovery.
-          expr: (max(up{namespace="llm", service="llama-server", endpoint="http"}) or vector(0)) < 1
+          # The demand controller scales the server to zero when nothing
+          # needs it, so only alert while it is meant to run (replicas from
+          # kube-state-metrics, which kube-prometheus-stack ships). Missing
+          # kube-state-metrics data silences this alert rather than firing.
+          expr: |
+            (
+              (max(up{namespace="llm", service="llama-server", endpoint="http"}) or vector(0)) < 1
+            )
+            and on ()
+            (max(kube_deployment_spec_replicas{namespace="llm", deployment="llama-server"}) > 0)
           for: 10m
           labels:
             severity: warning
             namespace: llm
             service: llama-server
           annotations:
-            summary: LLM metrics have been unavailable for 10 minutes
-            description: Check the llama-server pod, model and GPU mounts, startup logs, and ServiceMonitor. Normal model loading and brief restarts are allowed 10 minutes to recover.
+            summary: LLM metrics have been unavailable for 10 minutes while it should be running
+            description: Check the llama-server pod, model and GPU mounts, startup logs, and ServiceMonitor. Normal model loading and brief restarts are allowed 10 minutes to recover. A server scaled to zero by the demand controller does not alert.
         - alert: LlamaServerQueueBacklog
           expr: max(llamacpp:requests_deferred{namespace="llm", service="llama-server"}) > 0
           for: 10m
@@ -31,3 +40,15 @@ spec:
           annotations:
             summary: LLM requests have been queued for 10 minutes
             description: The server has had a continuous request backlog. Inspect the LLM inference dashboard and request volume before adjusting concurrency, token limits, or GPU capacity.
+        - alert: LlmDemandControllerStalled
+          # Without the controller the LLM neither starts for a requesting
+          # application nor stops when idle, and lab-mode switches do nothing.
+          expr: (time() - max(llm_demand_last_success_timestamp_seconds{namespace="llm"}) > 300) or absent(llm_demand_last_success_timestamp_seconds{namespace="llm"})
+          for: 10m
+          labels:
+            severity: warning
+            namespace: llm
+            service: llm-demand
+          annotations:
+            summary: The LLM demand controller has not completed a loop for 15 minutes
+            description: Check kubectl -n llm logs deployment/llm-demand for Kubernetes API or permission errors. Until it recovers, the LLM is not started or stopped on demand.

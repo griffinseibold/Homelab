@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: llm-demand
+  labels:
+    app.kubernetes.io/name: llm-demand
+---
+# Requests can come from any namespace, so finding them needs a cluster-wide
+# list. Reading workload specs is the only cluster-wide permission.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: llm-demand-read-workloads
+  labels:
+    app.kubernetes.io/name: llm-demand
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: llm-demand-read-workloads
+  labels:
+    app.kubernetes.io/name: llm-demand
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: llm-demand-read-workloads
+subjects:
+  - kind: ServiceAccount
+    name: llm-demand
+    namespace: llm
+---
+# In its own namespace the controller may read only the mode ConfigMap and
+# resize only llama-server. resourceNames cannot restrict list, which is why
+# both rules use get. The ConfigMap may not exist; a get still answers 404.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: llm-demand
+  labels:
+    app.kubernetes.io/name: llm-demand
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["lab-mode"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: ["llama-server"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: llm-demand
+  labels:
+    app.kubernetes.io/name: llm-demand
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: llm-demand
+subjects:
+  - kind: ServiceAccount
+    name: llm-demand
+    namespace: llm
+# The Role for the chat namespace lives in kubernetes/infrastructure/chat,
+# because that namespace is created by the chat Flux Kustomization, which
+# depends on this one.

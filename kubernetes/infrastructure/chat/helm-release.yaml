@@ -15,6 +15,20 @@ spec:
         name: open-webui
   driftDetection:
     mode: enabled
+    # The LLM demand controller owns replica counts: it runs the chat only in
+    # llm mode. Without these, drift correction would restart it in apps
+    # mode. With persistence on local storage the chart (16.3.0) renders a
+    # StatefulSet, plus a Deployment for its bundled websocket Redis; both
+    # kinds are listed so a chart default change keeps working. A chart
+    # upgrade can still reset replicas once; the controller corrects that
+    # within its 15-second loop.
+    ignore:
+      - paths: ["/spec/replicas"]
+        target:
+          kind: StatefulSet
+      - paths: ["/spec/replicas"]
+        target:
+          kind: Deployment
   install:
     remediation:
       retries: -1

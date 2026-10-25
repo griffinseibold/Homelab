@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-demand
+  labels:
+    app.kubernetes.io/name: llm-demand
+spec:
+  selector:
+    app.kubernetes.io/name: llm-demand
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics

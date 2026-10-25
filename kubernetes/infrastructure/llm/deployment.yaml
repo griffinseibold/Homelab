@@ -6,7 +6,12 @@ metadata:
     app.kubernetes.io/name: llama-server
 spec:
   # One GPU, one server. Additional models become additional deployments.
-  replicas: 1
+  # replicas is deliberately absent: the LLM demand controller (demand/)
+  # scales this between 0 and 1, and a value here would make Flux's
+  # server-side apply reset it on every sync. On a fresh install (and once on
+  # the upgrade that removed the field) the Deployment starts at the
+  # Kubernetes default of one replica; the controller stops it after its idle
+  # grace if nothing needs it.
   strategy:
     type: Recreate
   selector:

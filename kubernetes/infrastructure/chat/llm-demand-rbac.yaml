@@ -1,0 +1,36 @@
+# Lets the LLM demand controller (kubernetes/infrastructure/llm/demand) start
+# the chat in llm mode and stop it in apps mode. It lives here rather than
+# with the controller because this Kustomization creates the namespace and
+# depends on the llm one. Until it exists the controller just waits.
+# Scaling goes through the scale subresource only; the controller cannot
+# change images, commands or anything else about these workloads.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: llm-demand
+  namespace: chat
+  labels:
+    app.kubernetes.io/name: llm-demand
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: llm-demand
+  namespace: chat
+  labels:
+    app.kubernetes.io/name: llm-demand
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: llm-demand
+subjects:
+  - kind: ServiceAccount
+    name: llm-demand
+    namespace: llm

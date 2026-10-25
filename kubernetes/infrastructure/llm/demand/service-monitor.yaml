@@ -1,0 +1,17 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: llm-demand
+  labels:
+    app.kubernetes.io/name: llm-demand
+spec:
+  # Prometheus discovers ServiceMonitors in every namespace without a
+  # release label (serviceMonitorSelectorNilUsesHelmValues: false).
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llm-demand
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

@@ -8,6 +8,8 @@ resources:
   - http-route.yaml
   - service-monitor.yaml
   - prometheus-rule.yaml
+  # Starts and stops the server on demand and switches the lab mode's chat.
+  - demand
 configMapGenerator:
   - name: llama-server-dashboard
     files:
