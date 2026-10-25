@@ -1,0 +1,2 @@
+---
+amd_gpu_user: "{{ lookup('env', 'USER') }}"

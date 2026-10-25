@@ -1,0 +1,19 @@
+---
+# Pinned k3s release. The installer at the same tag verifies the binary's
+# SHA-256 against the release's sha256sum-amd64.txt.
+# https://docs.k3s.io/release-notes/v1.36.X
+k3s_version: "v1.36.5+k3s1"
+k3s_install_script_url: "https://raw.githubusercontent.com/k3s-io/k3s/{{ k3s_version | urlencode }}/install.sh"
+
+# The user who runs kubectl, flux and the scripts (the one who invoked
+# bootstrap-host.sh), and where their copy of the admin kubeconfig goes.
+k3s_user: "{{ lookup('env', 'USER') }}"
+k3s_user_home: "{{ lookup('env', 'HOME') }}"
+k3s_user_kubeconfig: "{{ k3s_user_home }}/.kube/homelab-dev.yaml"
+
+# k3s names its kubeconfig cluster, user and context "default". Renaming them
+# to homelab-dev lets the file merge into ~/.kube/config next to other
+# clusters, and keeps every command in the docs (--context homelab-dev)
+# working. tests/test_k3s_host.py applies this same expression to a sample.
+k3s_kubeconfig_name_pattern: '(?m)^([ \t]*(?:-[ \t]+)?(?:name|cluster|user|current-context):[ \t]+)default[ \t]*$'
+k3s_kubeconfig_name_replacement: '\g<1>homelab-dev'

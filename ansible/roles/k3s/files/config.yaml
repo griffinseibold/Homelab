@@ -1,0 +1,29 @@
+# k3s server configuration for the single-node homelab-dev cluster.
+# Every key is the long name of a `k3s server` flag. Managed by Ansible
+# (ansible/roles/k3s); edit it here, then rerun ./scripts/bootstrap-host.sh.
+
+# The admin kubeconfig stays root-only; Ansible copies it to the user's
+# ~/.kube/homelab-dev.yaml with the cluster renamed.
+write-kubeconfig-mode: "0600"
+
+# The Gateway (Envoy Gateway, Flux-managed) is the only ingress, and it is
+# published through hostPorts bound to specific addresses. Traefik would
+# take ports 80 and 443 on every address, and ServiceLB would publish
+# LoadBalancer Services on every address, so both stay off. The local-path
+# storage provisioner stays on: it is the default storage class.
+disable:
+  - traefik
+  - servicelb
+
+# One node: pod traffic never leaves the host, so plain routes are enough and
+# no VXLAN port (UDP 8472) is opened.
+flannel-backend: host-gw
+
+# NodePort Services, if one is ever created, listen on loopback only instead
+# of every host address. The Gateway itself uses a ClusterIP Service.
+kube-proxy-arg:
+  - nodeport-addresses=127.0.0.1/32
+
+# Encrypt Secrets at rest in the datastore (lab CA key, Garage tokens, S3
+# credentials).
+secrets-encryption: true

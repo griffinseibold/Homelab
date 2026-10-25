@@ -40,11 +40,8 @@ echo "Using ${become_executable} for privilege escalation."
 )
 
 echo
-echo "Host bootstrap complete."
-
-if docker info >/dev/null 2>&1; then
-  echo "Docker is available in this session. Run ./scripts/bootstrap-dev.sh next."
-else
-  echo "Log out and back in once to activate Docker group membership."
-  echo "Then return to ${repository_root} and run ./scripts/bootstrap-dev.sh."
-fi
+echo "Host bootstrap complete. k3s is running as the homelab-dev cluster:"
+echo "  kubectl --context homelab-dev get nodes"
+echo "Run ./scripts/bootstrap-dev.sh next."
+echo "Group changes for host GPU tools (render, video) apply at your next login;"
+echo "the cluster does not need them."

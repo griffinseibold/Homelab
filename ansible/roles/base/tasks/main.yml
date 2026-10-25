@@ -15,10 +15,9 @@
       - unzip
     state: present
 
-# Kind nodes share the host kernel, and Ubuntu's default inotify limits are
-# too low for the kubelet log tailing that centralized logging relies on.
-# These are the values recommended by Kind's known-issues documentation.
-- name: Raise inotify limits for Kind log tailing
+# Ubuntu's default inotify limits are too low for the kubelet and Alloy log
+# tailing that centralized logging relies on, once many pods run on one host.
+- name: Raise inotify limits for log tailing
   ansible.builtin.copy:
     dest: /etc/sysctl.d/99-homelab-inotify.conf
     mode: "0644"
@@ -27,22 +26,20 @@
       fs.inotify.max_user_instances = 512
   register: inotify_sysctl
 
-# A cluster created with LAN_ADDRESS publishes the Gateway on that one address.
-# Docker starts Kind's nodes at boot once the network is "online", which can
-# happen before DHCP assigns the IPv4 address; this lets the port binding
-# succeed anyway instead of leaving the control-plane node stopped.
-- name: Allow Docker to bind the LAN address before DHCP assigns it
-  ansible.builtin.copy:
-    dest: /etc/sysctl.d/99-homelab-lan.conf
-    mode: "0644"
-    content: |
-      net.ipv4.ip_nonlocal_bind = 1
-  register: lan_sysctl
+# Kind needed net.ipv4.ip_nonlocal_bind so Docker could bind LAN_ADDRESS
+# before DHCP assigned it. k3s publishes the Gateway with packet forwarding
+# rules instead of listening sockets, so nothing binds the address and the
+# setting is no longer needed. It takes effect for a running kernel at the
+# next reboot.
+- name: Remove the Kind-era non-local bind setting
+  ansible.builtin.file:
+    path: /etc/sysctl.d/99-homelab-lan.conf
+    state: absent
 
 - name: Apply sysctl settings
   ansible.builtin.command:
     cmd: sysctl --system
-  when: inotify_sysctl.changed or lan_sysctl.changed
+  when: inotify_sysctl.changed
 
 - name: Ensure apt keyrings directory exists
   ansible.builtin.file:

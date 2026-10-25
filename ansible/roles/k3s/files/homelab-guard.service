@@ -1,0 +1,16 @@
+[Unit]
+Description=Homelab firewall guard for k3s control ports
+Documentation=file:///etc/homelab/homelab-guard.nft
+# Load before k3s opens its ports.
+Before=k3s.service
+Wants=network-pre.target
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/homelab/homelab-guard.nft
+ExecStop=/usr/sbin/nft delete table inet homelab_guard
+
+[Install]
+WantedBy=multi-user.target

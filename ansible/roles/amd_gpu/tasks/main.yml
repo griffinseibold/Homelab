@@ -1,0 +1,59 @@
+---
+# Checks that the host's AMD GPU can be handed to pods by AMD's Kubernetes
+# device plugin. The in-kernel amdgpu driver is all the host needs: it
+# provides /dev/kfd (compute) and /dev/dri (graphics and Vulkan). ROCm and
+# Vulkan user space come in the container images, so no ROCm packages or
+# DKMS kernel modules are installed here; a DKMS module would also have to
+# be rebuilt on every kernel update.
+
+- name: Check that the amdgpu kernel driver is loaded
+  ansible.builtin.stat:
+    path: /sys/module/amdgpu
+  register: amdgpu_module
+
+- name: Require the amdgpu kernel driver
+  ansible.builtin.assert:
+    that: amdgpu_module.stat.exists
+    fail_msg: >-
+      The amdgpu kernel driver is not loaded. Ubuntu's kernel includes it; check
+      `lsmod | grep amdgpu` and `sudo dmesg | grep -i amdgpu`, and that the GPU is
+      not bound to another driver.
+
+- name: Check for the AMD compute device
+  ansible.builtin.stat:
+    path: /dev/kfd
+  register: kfd_device
+
+# The device plugin finds GPUs through the KFD topology and always gives a
+# pod /dev/kfd alongside the GPU's /dev/dri nodes.
+- name: Require /dev/kfd
+  ansible.builtin.assert:
+    that: kfd_device.stat.exists and kfd_device.stat.ischr
+    fail_msg: >-
+      /dev/kfd is missing, so AMD's device plugin cannot advertise the GPU. It
+      comes from the amdgpu driver's KFD support; check `sudo dmesg | grep -i kfd`.
+
+- name: Find GPU render nodes
+  ansible.builtin.find:
+    paths: /dev/dri
+    patterns: "renderD*"
+    file_type: any
+  register: render_nodes
+
+- name: Require a GPU render node
+  ansible.builtin.assert:
+    that: render_nodes.matched > 0
+    fail_msg: >-
+      No /dev/dri/renderD* device exists. The Vulkan LLM server uses the GPU's
+      render node; check the amdgpu driver.
+
+# Pods get the devices from the device plugin regardless of these groups.
+# Membership lets the user run host tools such as vulkaninfo or amd-smi
+# against the same GPU. It takes effect at the next login.
+- name: Add the user to the GPU device groups
+  ansible.builtin.user:
+    name: "{{ amd_gpu_user }}"
+    groups:
+      - render
+      - video
+    append: true

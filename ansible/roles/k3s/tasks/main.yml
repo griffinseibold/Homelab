@@ -1,0 +1,133 @@
+---
+# A single-node k3s cluster named homelab-dev on this host. It replaces the
+# Kind cluster so AMD's device plugin can hand the real GPU to pods.
+
+- name: Install nftables for the k3s port guard
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+
+- name: Create the homelab configuration directory
+  ansible.builtin.file:
+    path: /etc/homelab
+    state: directory
+    mode: "0755"
+
+# k3s runs the API server and kubelet directly on the host, listening on
+# every address. Kind kept them inside containers. The guard keeps them off
+# the network before k3s first starts.
+- name: Install the k3s port guard rules
+  ansible.builtin.copy:
+    src: homelab-guard.nft
+    dest: /etc/homelab/homelab-guard.nft
+    mode: "0644"
+  notify: Reload homelab guard
+
+- name: Install the k3s port guard service
+  ansible.builtin.copy:
+    src: homelab-guard.service
+    dest: /etc/systemd/system/homelab-guard.service
+    mode: "0644"
+  register: guard_unit
+
+- name: Enable and start the k3s port guard
+  ansible.builtin.systemd_service:
+    name: homelab-guard
+    enabled: true
+    state: started
+    daemon_reload: "{{ guard_unit.changed }}"
+
+- name: Create the k3s configuration directory
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: "0755"
+
+- name: Configure the k3s server
+  ansible.builtin.copy:
+    src: config.yaml
+    dest: /etc/rancher/k3s/config.yaml
+    mode: "0600"
+  notify: Restart k3s
+
+- name: Read the installed k3s version
+  ansible.builtin.command:
+    cmd: k3s --version
+  register: k3s_installed
+  changed_when: false
+  failed_when: false
+
+- name: Create the directory for the pinned k3s installer
+  ansible.builtin.file:
+    path: /usr/local/lib/homelab
+    state: directory
+    mode: "0755"
+
+# The installer from the same release tag downloads that release and checks
+# its SHA-256 against the published sha256sum-amd64.txt.
+- name: Download the k3s installer for the pinned release
+  ansible.builtin.get_url:
+    url: "{{ k3s_install_script_url }}"
+    dest: /usr/local/lib/homelab/k3s-install.sh
+    mode: "0755"
+    force: true
+  when: k3s_version not in k3s_installed.stdout | default('')
+
+- name: Install k3s {{ k3s_version }}
+  ansible.builtin.command:
+    cmd: /usr/local/lib/homelab/k3s-install.sh
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    # kubectl comes from the Kubernetes apt repository (kubernetes_tools);
+    # do not let k3s replace it with a symlink.
+    INSTALL_K3S_SYMLINK: skip
+  when: k3s_version not in k3s_installed.stdout | default('')
+  notify: Restart k3s
+
+- name: Flush pending k3s restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start k3s
+  ansible.builtin.systemd_service:
+    name: k3s
+    enabled: true
+    state: started
+
+- name: Wait for the k3s node to become ready
+  ansible.builtin.command:
+    cmd: k3s kubectl wait --for=condition=Ready nodes --all --timeout=30s
+  register: k3s_ready
+  retries: 10
+  delay: 10
+  until: k3s_ready.rc == 0
+  changed_when: false
+
+- name: Read the k3s admin kubeconfig
+  ansible.builtin.slurp:
+    src: /etc/rancher/k3s/k3s.yaml
+  register: k3s_admin_kubeconfig
+
+- name: Create the user's kubeconfig directory
+  ansible.builtin.file:
+    path: "{{ k3s_user_home }}/.kube"
+    state: directory
+    owner: "{{ k3s_user }}"
+    mode: "0700"
+
+# The same admin credentials, readable only by the user, with the cluster,
+# user and context renamed from "default" to homelab-dev.
+- name: Write the homelab-dev kubeconfig for the user
+  ansible.builtin.copy:
+    dest: "{{ k3s_user_kubeconfig }}"
+    content: >-
+      {{ k3s_admin_kubeconfig.content | b64decode
+         | regex_replace(k3s_kubeconfig_name_pattern, k3s_kubeconfig_name_replacement) }}
+    owner: "{{ k3s_user }}"
+    mode: "0600"
+
+- name: Merge the homelab-dev context into the user's kubeconfig
+  ansible.builtin.script:
+    cmd: merge-kubeconfig.sh
+  become: false
+  register: kubeconfig_merge
+  changed_when: "'changed' in kubeconfig_merge.stdout"

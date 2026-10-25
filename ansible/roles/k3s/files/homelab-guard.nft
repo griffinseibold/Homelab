@@ -1,0 +1,31 @@
+#!/usr/sbin/nft -f
+# Keep k3s's own control ports off the network. Kind kept the API server on a
+# loopback port and the kubelet inside a container; k3s runs them on the host,
+# listening on every address. This table drops new connections to them from
+# anywhere except loopback and the pod network. It does not touch other
+# ports (SSH and anything else you run keep working), and the Gateway's
+# hostPorts are unaffected: they are forwarded to the Envoy pod before the
+# input hook. Managed by Ansible (ansible/roles/k3s).
+
+table inet homelab_guard
+delete table inet homelab_guard
+
+table inet homelab_guard {
+  chain input {
+    type filter hook input priority filter - 10; policy accept;
+
+    iifname "lo" accept
+    # Pods reach the API server, kubelet and node-exporter through the node
+    # address, arriving from the CNI bridge.
+    iifname "cni0" accept
+    ct state established,related accept
+
+    # 6443 API server, 6444 supervisor, 10250 kubelet, 10256 kube-proxy
+    # health, 10257 controller-manager, 10259 scheduler, 2379-2380 etcd
+    # (unused with the default SQLite datastore), 9100 node-exporter
+    # (host network).
+    tcp dport { 2379-2380, 6443-6444, 9100, 10250, 10256, 10257, 10259 } drop
+    # Flannel VXLAN and WireGuard backends (unused with host-gw).
+    udp dport { 8472, 51820, 51821 } drop
+  }
+}
