@@ -377,6 +377,88 @@ def restore(directory, claim, target_claim):
     print(f"Restored {claim} into {target_claim or claim}; verify the restored data before starting its workload.")
 
 
+# Annotations the control plane sets while binding; a new claim must not carry them.
+BINDING_ANNOTATION_PREFIXES = ("pv.kubernetes.io/", "volume.kubernetes.io/", "volume.beta.kubernetes.io/")
+BIND_IMAGE = "busybox:1.37.0"
+
+
+def kubectl(*args, stdin=None):
+    command = ["kubectl", "--context", CONTEXT, "--request-timeout=30s", *args]
+    if stdin is None:
+        return output(*command)
+    return run(*command, input=stdin, stdout=subprocess.PIPE, text=True, timeout=180).stdout
+
+
+def empty_claim_manifest(pvc):
+    """A new claim with the same name, labels, annotations and request as pvc, but no volume."""
+    meta = pvc["metadata"]
+    metadata = {k: meta[k] for k in ("name", "namespace", "labels") if k in meta}
+    annotations = {k: v for k, v in (meta.get("annotations") or {}).items()
+                   if not k.startswith(BINDING_ANNOTATION_PREFIXES)
+                   and k != "kubectl.kubernetes.io/last-applied-configuration"}
+    if annotations:
+        # Helm's ownership annotations survive, so a resumed HelmRelease
+        # adopts the new claim instead of failing on it.
+        metadata["annotations"] = annotations
+    spec = {k: pvc["spec"][k] for k in ("accessModes", "resources", "storageClassName", "volumeMode")
+            if k in pvc["spec"]}
+    return {"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": metadata, "spec": spec}
+
+
+def new_claim_manifest(namespace, name, size):
+    storage_bytes(size)  # Rejects a malformed quantity before anything changes.
+    return {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+            "metadata": {"name": name, "namespace": namespace},
+            "spec": {"accessModes": ["ReadWriteOnce"], "storageClassName": STORAGE_CLASS,
+                     "resources": {"requests": {"storage": size}}}}
+
+
+def bind_pod_manifest(namespace, claim):
+    # local-path binds a claim only once a pod uses it. This pod never writes.
+    return {"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": f"bind-{claim}"[:63].rstrip("-."), "namespace": namespace},
+            "spec": {"restartPolicy": "Never", "automountServiceAccountToken": False,
+                     "securityContext": {"runAsNonRoot": True, "runAsUser": 65534,
+                                         "seccompProfile": {"type": "RuntimeDefault"}},
+                     "containers": [{"name": "bind", "image": BIND_IMAGE, "command": ["sleep", "3600"],
+                                     "securityContext": {"allowPrivilegeEscalation": False,
+                                                         "readOnlyRootFilesystem": True,
+                                                         "capabilities": {"drop": ["ALL"]}},
+                                     "volumeMounts": [{"name": "data", "mountPath": "/restore",
+                                                       "readOnly": True}]}],
+                     "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": claim}}]}}
+
+
+def empty_claim(claim, size=None, replace=False):
+    """Leave namespace/claim as an empty, bound claim for restore-volume."""
+    namespace, _, name = claim.partition("/")
+    if not namespace or not name:
+        raise ValueError("Name the claim as namespace/name")
+    found = kubectl("get", "pvc", name, "-n", namespace, "--ignore-not-found", "-o", "json").strip()
+    if found:
+        if not replace:
+            raise ValueError(f"{claim} exists; pass --replace to delete it and its data first")
+        require_unused_volume({"namespace": namespace, "claim": name})
+        manifest = empty_claim_manifest(json.loads(found))
+        print(f"Deleting {claim} and its data...", flush=True)
+        kubectl("delete", "pvc", name, "-n", namespace, "--wait=true", "--timeout=2m")
+    else:
+        if not size:
+            raise ValueError(f"{claim} does not exist; pass --size with at least the original capacity")
+        if replace:
+            raise ValueError(f"{claim} does not exist; there is nothing to replace")
+        kubectl("get", "namespace", namespace)  # Fails clearly if the namespace is missing.
+        manifest = new_claim_manifest(namespace, name, size)
+    kubectl("create", "-f", "-", stdin=json.dumps(manifest))
+    pod = bind_pod_manifest(namespace, name)
+    kubectl("create", "-f", "-", stdin=json.dumps(pod))
+    try:
+        kubectl("wait", f"pvc/{name}", "-n", namespace, "--for=jsonpath={.status.phase}=Bound", "--timeout=3m")
+    finally:
+        kubectl("delete", "pod", pod["metadata"]["name"], "-n", namespace, "--wait=true", "--timeout=2m")
+    print(f"{claim} is empty and bound; restore into it with restore-volume.")
+
+
 def interrupted(signum, _frame):
     raise KeyboardInterrupt(f"Interrupted by signal {signum}")
 
@@ -395,11 +477,20 @@ def main():
     restore_parser.add_argument("directory", type=Path)
     restore_parser.add_argument("claim", help="Original namespace/PVC-name")
     restore_parser.add_argument("--target-claim", help="Different destination namespace/PVC-name")
+    empty_parser = sub.add_parser("empty-claim", help="Create, or with --replace recreate, an EMPTY bound PVC "
+                                  "to restore into; --replace deletes the claim's data")
+    empty_parser.add_argument("claim", help="namespace/PVC-name")
+    empty_parser.add_argument("--size", help="Capacity for a new claim, at least the original's (manifest.json)")
+    empty_parser.add_argument("--replace", action="store_true",
+                              help="Delete the existing claim and its data, then recreate it empty")
     args = parser.parse_args()
     try:
         if args.command == "create":
             with operation_lock():
                 create(args.output.expanduser().resolve())
+        elif args.command == "empty-claim":
+            with operation_lock():
+                empty_claim(args.claim, args.size, args.replace)
         elif args.command == "verify":
             snapshot = verified_snapshot(args.directory)
             print(f'Backup verified: {len(snapshot["volumes"])} volume(s), plus Argo registrations')

@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -333,6 +334,83 @@ class BackupTests(unittest.TestCase):
                 pv["spec"]["hostPath"]["path"] = path
                 with self.subTest(path=path), self.assertRaisesRegex(ValueError, "Unsupported"):
                     backup.volume_inventory(["host"])
+
+    def helm_claim(self):
+        return {"metadata": {"name": "open-webui", "namespace": "chat", "uid": "123", "resourceVersion": "9",
+                             "labels": {"app.kubernetes.io/managed-by": "Helm"},
+                             "annotations": {"meta.helm.sh/release-name": "open-webui",
+                                             "pv.kubernetes.io/bind-completed": "yes",
+                                             "volume.kubernetes.io/selected-node": "host"}},
+                "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "2Gi"}},
+                         "storageClassName": "local-path", "volumeMode": "Filesystem", "volumeName": "pvc-1"},
+                "status": {"phase": "Bound"}}
+
+    def fake_kubectl(self, existing):
+        calls = []
+        def kubectl(*args, stdin=None):
+            calls.append((args, json.loads(stdin) if stdin else None))
+            if args[:2] == ("get", "pvc"):
+                return json.dumps(existing) if existing else ""
+            return ""
+        return calls, kubectl
+
+    def test_empty_claim_replaces_a_claim_keeping_helm_ownership(self):
+        calls, kubectl = self.fake_kubectl(self.helm_claim())
+        with patch.object(backup, "kubectl", side_effect=kubectl), \
+             patch.object(backup, "require_unused_volume") as unused, redirect_stdout(io.StringIO()):
+            backup.empty_claim("chat/open-webui", replace=True)
+        unused.assert_called_once()
+        verbs = [args[0] for args, _ in calls]
+        self.assertEqual(verbs, ["get", "delete", "create", "create", "wait", "delete"])
+        claim = calls[2][1]
+        self.assertEqual(claim["metadata"], {"name": "open-webui", "namespace": "chat",
+                                             "labels": {"app.kubernetes.io/managed-by": "Helm"},
+                                             "annotations": {"meta.helm.sh/release-name": "open-webui"}})
+        self.assertNotIn("volumeName", claim["spec"])
+        self.assertEqual(claim["spec"]["resources"], {"requests": {"storage": "2Gi"}})
+        pod = calls[3][1]
+        self.assertTrue(pod["spec"]["containers"][0]["volumeMounts"][0]["readOnly"])
+        self.assertEqual(calls[5][0][:3], ("delete", "pod", "bind-open-webui"))
+
+    def test_empty_claim_never_deletes_without_replace(self):
+        calls, kubectl = self.fake_kubectl(self.helm_claim())
+        with patch.object(backup, "kubectl", side_effect=kubectl):
+            with self.assertRaisesRegex(ValueError, "--replace"):
+                backup.empty_claim("chat/open-webui")
+        self.assertEqual([args[0] for args, _ in calls], ["get"])
+
+    def test_empty_claim_refuses_a_claim_in_use(self):
+        calls, kubectl = self.fake_kubectl(self.helm_claim())
+        with patch.object(backup, "kubectl", side_effect=kubectl), \
+             patch.object(backup, "require_unused_volume", side_effect=ValueError("used by a pod")):
+            with self.assertRaisesRegex(ValueError, "used by a pod"):
+                backup.empty_claim("chat/open-webui", replace=True)
+        self.assertFalse(any(args[0] == "delete" for args, _ in calls))
+
+    def test_empty_claim_creates_a_new_claim_of_the_given_size(self):
+        calls, kubectl = self.fake_kubectl(None)
+        with patch.object(backup, "kubectl", side_effect=kubectl), redirect_stdout(io.StringIO()):
+            backup.empty_claim("hello-crud/data", size="1Gi")
+        claim = next(body for args, body in calls if body and body["kind"] == "PersistentVolumeClaim")
+        self.assertEqual(claim["spec"]["storageClassName"], "local-path")
+        self.assertEqual(claim["spec"]["resources"]["requests"]["storage"], "1Gi")
+        for size, replace, message in ((None, False, "--size"), ("1Gi", True, "nothing to replace"),
+                                       ("lots", False, "Unsupported storage quantity")):
+            with self.subTest(size=size), patch.object(backup, "kubectl", side_effect=self.fake_kubectl(None)[1]):
+                with self.assertRaisesRegex(ValueError, message):
+                    backup.empty_claim("hello-crud/data", size=size, replace=replace)
+
+    def test_empty_claim_removes_the_bind_pod_even_if_binding_fails(self):
+        calls = []
+        def kubectl(*args, stdin=None):
+            calls.append(args)
+            if args[0] == "wait":
+                raise subprocess.CalledProcessError(1, ["kubectl", "wait"])
+            return ""
+        with patch.object(backup, "kubectl", side_effect=kubectl):
+            with self.assertRaises(subprocess.CalledProcessError):
+                backup.empty_claim("hello-crud/data", size="1Gi")
+        self.assertEqual(calls[-1][:2], ("delete", "pod"))
 
 
 if __name__ == "__main__":
