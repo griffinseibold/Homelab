@@ -32,6 +32,8 @@ replica.
 It schedules on workers labeled `homelab.local/llm-capable=true`, where the
 bootstrap has checked read-only model mounts and `/dev/dri` device mounts.
 Both workers share the same physical GPU; they do not provide two GPUs.
+The `llm.localhost` route allows 300 seconds per request instead of Envoy
+Gateway's 15-second default, so long or thinking-first generations finish.
 
 ## LLM on demand and LLM mode
 

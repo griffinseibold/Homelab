@@ -16,6 +16,10 @@ spec:
         - path:
             type: PathPrefix
             value: /
+      # Envoy Gateway's default 15s request timeout cuts off long generations,
+      # especially Qwen3 thinking before it answers. Match client timeouts.
+      timeouts:
+        request: 300s
       backendRefs:
         - name: llama-server
           port: 80
