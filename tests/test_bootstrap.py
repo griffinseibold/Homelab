@@ -15,8 +15,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL_NAME = "Qwen3-8B-Q4_K_M.gguf"
-MODEL_CHECKSUM = "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"
+MODEL_NAME = "Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf"
+MODEL_CHECKSUM = "9c964e657212fea1f24905dd7b0a89b82fd807d19fab0b41da14251b07b88fbe"
 PAYLOAD = b"test model bytes\n"
 
 

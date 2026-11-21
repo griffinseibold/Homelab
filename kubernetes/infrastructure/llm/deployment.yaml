@@ -30,11 +30,23 @@ spec:
           image: ghcr.io/ggml-org/llama.cpp:server-vulkan-b10731
           args:
             - --model
-            - /models/Qwen3-8B-Q4_K_M.gguf
+            - /models/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf
+            - --alias
+            - qwen3.6-35b-a3b
             - --n-gpu-layers
             - "99"
             - --ctx-size
-            - "32768"
+            - "65536"
+            # q8_0 KV cache with flash attention: 64K context and the 12.3 GiB
+            # of weights use about 13 GiB of the 16 GiB card.
+            - --flash-attn
+            - "on"
+            - --cache-type-k
+            - q8_0
+            - --cache-type-v
+            - q8_0
+            # The model's chat template; without it there is no tool calling.
+            - --jinja
             - --host
             - 0.0.0.0
             - --port
@@ -69,7 +81,8 @@ spec:
               cpu: 500m
               memory: 2Gi
             limits:
-              memory: 12Gi
+              # The weights are memory-mapped from the host while they load.
+              memory: 16Gi
           volumeMounts:
             - name: models
               mountPath: /models

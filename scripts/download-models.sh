@@ -21,7 +21,7 @@ fi
 
 # name  url  sha256
 models=(
-  "Qwen3-8B-Q4_K_M.gguf https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"
+  "Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf 9c964e657212fea1f24905dd7b0a89b82fd807d19fab0b41da14251b07b88fbe"
 )
 
 checksum_is_valid() {

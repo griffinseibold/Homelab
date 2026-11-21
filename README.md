@@ -11,7 +11,7 @@ Ubuntu → Docker → Kind: homelab-dev (one control plane, two workers)
                     ├─ Flux + Envoy Gateway → localhost:8080, optional home-network HTTPS
                     ├─ cert-manager → *.lab.internal from a host-kept root CA
                     ├─ Prometheus, Grafana, Loki and Alloy
-                    ├─ llama.cpp / Vulkan → Qwen3-8B, started on demand
+                    ├─ llama.cpp / Vulkan → Qwen3.6-35B-A3B, started on demand
                     │    └─ llm-demand controller → scales the LLM and Open WebUI
                     ├─ Garage → in-cluster S3 (datasets, checkpoints, MLflow artifacts)
                     ├─ MLflow → experiment tracking

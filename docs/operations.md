@@ -27,9 +27,12 @@ curl --noproxy '*' --fail http://llm.localhost:8080/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"Hello!"}],"max_tokens":128}'
 ```
 
-The server uses Qwen3-8B Q4_K_M with a 32,768-token context (its native
-length; the KV cache needs about 4.5 GiB of VRAM at that size) and at most one
-replica.
+The server uses Qwen3.6-35B-A3B (a mixture-of-experts model with 3B active
+parameters, unsloth `UD-IQ3_XXS`) with a 65,536-token context, a q8_0 KV cache
+and tool calling (`--jinja`), at most one replica. Weights and cache use about
+13 GiB of VRAM. On this RX 6800 it processes prompts at about 775 tokens/s at
+32K context and generates about 100 tokens/s. The dense Qwen3.8-27B was a little
+more precise but 3.5 times slower per agent turn (188 and 32 tokens/s).
 It schedules on workers labeled `homelab.local/llm-capable=true`, where the
 bootstrap has checked read-only model mounts and `/dev/dri` device mounts.
 Both workers share the same physical GPU; they do not provide two GPUs.
