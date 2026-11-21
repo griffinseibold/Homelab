@@ -156,3 +156,6 @@ adds these capabilities:
 The next operational gaps are off-host encrypted backups, an external alert
 receiver, and managed secrets. Public access would also require authentication
 and TLS. Keep plaintext credentials, model weights, and backups out of Git.
+
+## License
+MIT. See [LICENSE](LICENSE).
